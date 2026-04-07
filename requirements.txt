@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic
+pydantic-settings
+python-dotenv
+openai
+cryptography
+snowflake-connector-python
+mysql-connector-python
+apscheduler
+python-jose[cryptography]
+passlib[bcrypt]

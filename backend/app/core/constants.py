@@ -1,0 +1,12 @@
+SUPPORTED_DB_TYPES = {"snowflake", "postgres", "mysql"}
+
+SUPPORTED_MODULES = {
+    "CONNECTION_MANAGER",
+    "SCHEMA_EXPLORER",
+    "QUERY_RUNNER",
+    "LINEAGE",
+    "ETL_AUTOMATION",
+    "OPTIMIZER",
+    "ENV_COMPARATOR",
+    "ADMIN_PANEL",
+}
