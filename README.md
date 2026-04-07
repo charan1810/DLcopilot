@@ -118,6 +118,30 @@ In production, set backend `CORS_ALLOW_ORIGINS` to include your GitHub Pages dom
 CORS_ALLOW_ORIGINS=https://charan1810.github.io
 ```
 
+## Deploy Backend on Render
+
+This repository now includes `render.yaml` for Render Blueprint deployment.
+
+1. Go to Render and create a new Web Service from this GitHub repo.
+2. Render will detect `render.yaml` and prefill build/start settings.
+3. Set required environment variables in Render:
+	- `APP_DB_URL`: production SQLAlchemy URL (example: `postgresql+psycopg2://user:pass@host:5432/dbname`)
+	- `SECRET_KEY`: Fernet key used by the app
+	- `JWT_SECRET`: JWT signing secret (can be same as `SECRET_KEY`, but recommended separate)
+	- `OPENAI_API_KEY`: your OpenAI key (backend only)
+4. Keep `CORS_ALLOW_ORIGINS` including your GitHub Pages origin:
+	- `https://charan1810.github.io`
+5. Deploy and copy your Render backend URL, for example:
+	- `https://dlcopilot-api.onrender.com`
+6. In GitHub repo Settings -> Secrets and variables -> Actions -> Variables, set:
+	- `VITE_API_BASE_URL=https://dlcopilot-api.onrender.com`
+7. Push to `main` (or rerun the Pages workflow) to rebuild frontend with the correct backend URL.
+
+Notes:
+
+- Do not put `OPENAI_API_KEY` into GitHub Pages variables.
+- If your `APP_DB_URL` provider gives `postgres://...`, convert it to `postgresql+psycopg2://...`.
+
 ## GitHub Readiness
 
 - `.gitignore` excludes local environments, dependency folders, databases, logs, and env files.
