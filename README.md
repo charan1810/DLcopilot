@@ -31,7 +31,8 @@ frontend/  React + Vite application
 2. Set `APP_DB_URL` to your SQLAlchemy connection string.
 3. Set `SECRET_KEY` to a valid Fernet key.
 4. Add `OPENAI_API_KEY` if you want AI SQL features enabled.
-5. If needed, put machine-specific overrides in `.env.local`.
+5. Set `CORS_ALLOW_ORIGINS` to the frontend URLs allowed to call your backend (comma-separated).
+6. If needed, put machine-specific overrides in `.env.local`.
 
 The backend loads environment values from the process environment first, then `.env`, then `.env.local` for local overrides.
 
@@ -82,6 +83,40 @@ npm run dev
 ```
 
 The frontend expects the backend at `http://localhost:8000`.
+
+To override API base URL, set `VITE_API_BASE_URL` before running frontend commands.
+
+Example (PowerShell):
+
+```powershell
+$env:VITE_API_BASE_URL="http://localhost:8000"
+npm run dev
+```
+
+## Deploy Frontend on GitHub Pages
+
+This repo includes a workflow at `.github/workflows/deploy-frontend-pages.yml` that builds `frontend/` and deploys to GitHub Pages on every push to `main`.
+
+1. In GitHub, open repository Settings → Pages.
+2. Under Build and deployment, set Source to GitHub Actions.
+3. In Settings → Secrets and variables → Actions → Variables, add:
+	- `VITE_API_BASE_URL`: your deployed backend URL (for example `https://your-backend.example.com`).
+4. Push to `main` and wait for the workflow to finish.
+5. Your site will be available at:
+	- `https://<your-username>.github.io/DLcopilot/`
+
+## API Key Safety (Important)
+
+- Do not place `OPENAI_API_KEY` in frontend code, `.env` files under `frontend/`, or GitHub Pages variables used in frontend builds.
+- GitHub Pages is static hosting; anything bundled into frontend JavaScript is public.
+- Keep `OPENAI_API_KEY` only on the backend host (Render/Railway/Fly.io/EC2/etc.) as a server environment variable.
+- Frontend should call your backend API, and backend calls OpenAI.
+
+In production, set backend `CORS_ALLOW_ORIGINS` to include your GitHub Pages domain, for example:
+
+```env
+CORS_ALLOW_ORIGINS=https://charan1810.github.io
+```
 
 ## GitHub Readiness
 

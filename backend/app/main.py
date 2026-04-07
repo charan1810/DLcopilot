@@ -27,6 +27,13 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
+DEFAULT_CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+_cors_from_env = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+if _cors_from_env:
+    CORS_ALLOW_ORIGINS = [origin.strip().rstrip("/") for origin in _cors_from_env.split(",") if origin.strip()]
+else:
+    CORS_ALLOW_ORIGINS = DEFAULT_CORS_ORIGINS
+
 
 # =========================
 # FastAPI app
@@ -38,7 +45,7 @@ app.include_router(admin_router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=CORS_ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
