@@ -6,51 +6,44 @@ It combines **schema exploration**, **natural language querying**, **data lineag
 
 ---
 
-## Why DataCopilot Was Built
+## Product Overview
 
-Today, end-to-end data work requires multiple teams, multiple tools, and weeks of back-and-forth — before a business user gets a single answer.
+> Click any image to view it full size.
 
-![Current State – Manual Multi-Tool Process](docs/images/current-state.png)
-
-The current landscape forces organizations to coordinate across a Database/Cloud Developer (Snowflake, Databricks, AWS), an ETL Developer (Informatica, Azure Data Factory, Talend), a Data Analyst (SQL, Excel, Jupyter), and a BI Developer (Power BI, Tableau, Looker) — just to deliver one report. Each handoff adds days of delay, inconsistency, and cost. When something changes, everyone is impacted and no one has full visibility.
-
----
-
-## The Future State — One Platform for the Entire Data Lifecycle
-
-DataCopilot replaces that fragmented chain with a single, unified, AI-powered platform.
-
-![Future State – Unified AI-Powered Platform](docs/images/future-state.png)
-
-From connecting to a data source all the way to delivering business insights — explore, transform, validate, track lineage, and query in natural language — all in one place, with no tool switching and no external dependencies.
-
----
-
-## How DataCopilot Helps Users
-
-![How DataCopilot Helps Users](docs/images/how-it-helps.png)
-
-A business user starts with a question. They connect once, explore schemas visually, ask the AI to generate SQL, validate and transform data, track lineage to understand dependencies, and share insights — all without leaving the platform. The result: **less tool switching, fewer handoffs, faster decisions**.
-
----
-
-## End-to-End Data Process with DataCopilot
-
-![End-to-End Data Process](docs/images/end-to-end-process.png)
-
-DataCopilot covers every stage of the data lifecycle in a single governed platform:
-
-| Stage | What DataCopilot Does |
-|---|---|
-| **Connect & Ingest** | Secure connections to any database, cloud platform, file, or API |
-| **Explore Data** | Auto-discover schemas, tables, columns, relationships, and metadata |
-| **Transform & ETL** | Build data flows, clean, join, and enrich data with reusable components |
-| **Validate Quality** | Run data quality checks, preview results, detect anomalies |
-| **Lineage & Impact** | Full end-to-end lineage — know what will break before it breaks |
-| **AI Insights** | Ask questions in natural language, generate SQL, explain trends |
-| **Reporting & Decisions** | Deliver dashboards, summaries, and self-service analytics to the business |
-
-**Key Benefits:** End-to-end on one platform · Faster time to insights · Self-service for business & technical users · Consistent & trusted data · Proactive impact visibility · Lower cost, higher efficiency
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <b>CURRENT STATE (Without DataCopilot) – Manual / Multi-Tool Process</b><br/><br/>
+      <a href="docs/images/current-state.png">
+        <img src="docs/images/current-state.png" width="100%" alt="Current State – Manual Multi-Tool Process"/>
+      </a>
+      <br/><sub>Multiple Tools · Multiple Teams · More Time · Higher Cost · More Dependencies</sub>
+    </td>
+    <td align="center" width="50%">
+      <b>FUTURE STATE (With DataCopilot) – Unified, AI-Powered End-to-End Platform</b><br/><br/>
+      <a href="docs/images/future-state.png">
+        <img src="docs/images/future-state.png" width="100%" alt="Future State – Unified AI-Powered Platform"/>
+      </a>
+      <br/><sub>One Platform · One Experience · Faster Delivery · Lower Cost · Complete Visibility</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <b>How DataCopilot Helps Users</b><br/><br/>
+      <a href="docs/images/how-it-helps.png">
+        <img src="docs/images/how-it-helps.png" width="100%" alt="How DataCopilot Helps Users"/>
+      </a>
+      <br/><sub>Less tool switching · Fewer handoffs · Faster decisions</sub>
+    </td>
+    <td align="center" width="50%">
+      <b>End-to-End Data Process with DataCopilot</b><br/><br/>
+      <a href="docs/images/end-to-end-process.png">
+        <img src="docs/images/end-to-end-process.png" width="100%" alt="End-to-End Data Process with DataCopilot"/>
+      </a>
+      <br/><sub>Secure & Governed · Unified & Connected · Trusted & Transparent · AI-Powered Productivity</sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
