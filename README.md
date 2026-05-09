@@ -1,6 +1,58 @@
 # DataCopilot
 
-DataCopilot is a full-stack database exploration and AI-assisted engineering tool built with FastAPI and React. It supports saved database connections, schema browsing, object metadata inspection, lineage views, query execution, pipeline scheduling, role-based auth, and OpenAI-backed SQL assistance.
+DataCopilot is an AI-powered, full-stack data intelligence platform that gives organizations a unified, self-service interface to connect, explore, query, and manage their databases — across multiple environments and database engines — without requiring deep technical expertise.
+
+It combines **schema exploration**, **natural language querying**, **data lineage mapping**, **environment comparison**, and **pipeline orchestration** into a single web application, backed by an AI layer (OpenAI GPT) that translates business questions into SQL, explains data structures, and automates repetitive engineering tasks — all secured by role-based access control.
+
+---
+
+## Why DataCopilot Was Built
+
+Today, end-to-end data work requires multiple teams, multiple tools, and weeks of back-and-forth — before a business user gets a single answer.
+
+![Current State – Manual Multi-Tool Process](docs/images/current-state.png)
+
+The current landscape forces organizations to coordinate across a Database/Cloud Developer (Snowflake, Databricks, AWS), an ETL Developer (Informatica, Azure Data Factory, Talend), a Data Analyst (SQL, Excel, Jupyter), and a BI Developer (Power BI, Tableau, Looker) — just to deliver one report. Each handoff adds days of delay, inconsistency, and cost. When something changes, everyone is impacted and no one has full visibility.
+
+---
+
+## The Future State — One Platform for the Entire Data Lifecycle
+
+DataCopilot replaces that fragmented chain with a single, unified, AI-powered platform.
+
+![Future State – Unified AI-Powered Platform](docs/images/future-state.png)
+
+From connecting to a data source all the way to delivering business insights — explore, transform, validate, track lineage, and query in natural language — all in one place, with no tool switching and no external dependencies.
+
+---
+
+## How DataCopilot Helps Users
+
+![How DataCopilot Helps Users](docs/images/how-it-helps.png)
+
+A business user starts with a question. They connect once, explore schemas visually, ask the AI to generate SQL, validate and transform data, track lineage to understand dependencies, and share insights — all without leaving the platform. The result: **less tool switching, fewer handoffs, faster decisions**.
+
+---
+
+## End-to-End Data Process with DataCopilot
+
+![End-to-End Data Process](docs/images/end-to-end-process.png)
+
+DataCopilot covers every stage of the data lifecycle in a single governed platform:
+
+| Stage | What DataCopilot Does |
+|---|---|
+| **Connect & Ingest** | Secure connections to any database, cloud platform, file, or API |
+| **Explore Data** | Auto-discover schemas, tables, columns, relationships, and metadata |
+| **Transform & ETL** | Build data flows, clean, join, and enrich data with reusable components |
+| **Validate Quality** | Run data quality checks, preview results, detect anomalies |
+| **Lineage & Impact** | Full end-to-end lineage — know what will break before it breaks |
+| **AI Insights** | Ask questions in natural language, generate SQL, explain trends |
+| **Reporting & Decisions** | Deliver dashboards, summaries, and self-service analytics to the business |
+
+**Key Benefits:** End-to-end on one platform · Faster time to insights · Self-service for business & technical users · Consistent & trusted data · Proactive impact visibility · Lower cost, higher efficiency
+
+---
 
 ## Stack
 
