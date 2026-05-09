@@ -1,12 +1,15 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import SchemaExplorerPage from "./pages/SchemaExplorerPage";
 import LineagePage from "./pages/LineagePage";
 import InsightsPage from "./pages/InsightsPage";
 import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
+import EnvComparatorPage from "./pages/EnvComparatorPage";
+import OptimizerPage from "./pages/OptimizerPage";
 import TopHeader from "./components/TopHeader";
 import SidebarNav from "./components/SidebarNav";
+import AppErrorBoundary from "./components/AppErrorBoundary";
 import { useAppContext } from "./context/AppContext";
 import { useAuth } from "./context/AuthContext";
 import "./styles.css";
@@ -44,11 +47,28 @@ function PlaceholderPage({ title, subtitle }) {
 }
 
 export default function App() {
-    const { activePage, setActivePage } = useAppContext();
+    const { activePage, setActivePage, clearAllCachedState } = useAppContext();
     const { isAuthenticated, loading: authLoading, user } = useAuth();
     const [authView, setAuthView] = useState("login"); // "login" | "signup"
     const [theme, setTheme] = useState("light");
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+    const previousAuthenticatedRef = useRef(false);
+
+    useEffect(() => {
+        if (isAuthenticated && !previousAuthenticatedRef.current) {
+            setActivePage("explorer");
+        }
+        previousAuthenticatedRef.current = isAuthenticated;
+    }, [isAuthenticated, setActivePage]);
+
+    useEffect(() => {
+        if (!isAuthenticated) {
+            return;
+        }
+        if (activePage === "admin" && user?.role !== "admin") {
+            setActivePage("explorer");
+        }
+    }, [activePage, isAuthenticated, setActivePage, user?.role]);
 
     const activeMeta = useMemo(() => {
         const map = {
@@ -107,8 +127,12 @@ export default function App() {
 
     // ── Authenticated ──
 
+    const effectiveActivePage = activePage === "admin" && user?.role !== "admin"
+        ? "explorer"
+        : activePage;
+
     const renderPage = () => {
-        switch (activePage) {
+        switch (effectiveActivePage) {
             case "explorer":
                 return <SchemaExplorerPage />;
             case "lineage":
@@ -116,19 +140,9 @@ export default function App() {
             case "insights":
                 return <InsightsPage />;
             case "comparator":
-                return (
-                    <PlaceholderPage
-                        title="Environment Comparator"
-                        subtitle="Compare schemas, tables, views, and metadata across environments with confidence."
-                    />
-                );
+                return <EnvComparatorPage />;
             case "optimizer":
-                return (
-                    <PlaceholderPage
-                        title="Optimizer"
-                        subtitle="Analyze query efficiency, identify bottlenecks, and suggest performance improvements."
-                    />
-                );
+                return <OptimizerPage />;
             case "admin":
                 return user?.role === "admin" ? (
                     <AdminUsersPage />
@@ -145,7 +159,7 @@ export default function App() {
             className={`app-shell theme-${theme} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}
         >
             <SidebarNav
-                activeItem={activePage}
+                activeItem={effectiveActivePage}
                 onSelect={setActivePage}
                 collapsed={sidebarCollapsed}
                 onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
@@ -164,7 +178,9 @@ export default function App() {
                     onToggleSidebar={() => setSidebarCollapsed((prev) => !prev)}
                 />
 
-                <main className="app-content">{renderPage()}</main>
+                <AppErrorBoundary onReset={clearAllCachedState}>
+                    <main className="app-content">{renderPage()}</main>
+                </AppErrorBoundary>
             </div>
         </div>
     );

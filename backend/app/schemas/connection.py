@@ -4,7 +4,7 @@ from typing import Optional
 
 class ConnectionBase(BaseModel):
     name: str
-    db_type: str = Field(..., description="snowflake | postgres | mysql")
+    db_type: str = Field(..., description="postgres | mysql")
 
     host: Optional[str] = None
     port: Optional[str] = None

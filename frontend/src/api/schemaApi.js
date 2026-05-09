@@ -270,7 +270,7 @@ export async function fixSqlQuery(connectionId, databaseName, sql, error, contex
         body: JSON.stringify({
             connection_id: connectionId,
             database_name: databaseName,
-            schema: context.schema || "public",
+            schema: context.schema || "src",
             object_name: context.object_name || "",
             sql,
             error,
@@ -499,14 +499,24 @@ export async function deletePipelineSchedule(pipelineId) {
     return parseJson(res);
 }
 
-export async function agenticGeneratePipelineSteps(pipelineId, userRequirement, selectedTables = []) {
+export async function agenticGeneratePipelineSteps(pipelineId, userRequirement, selectedTables = [], options = {}) {
     const res = await fetch(`${API_BASE}/api/pipelines/${pipelineId}/ai-generate-steps`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({
             user_requirement: userRequirement,
             selected_tables: selectedTables,
+            allow_create_target: options.allowCreateTarget === true,
         }),
+    });
+    return parseJson(res);
+}
+
+export async function aiSuggestPipelineMapping(payload) {
+    const res = await fetch(`${API_BASE}/api/pipeline-mapping/ai-suggest`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
     });
     return parseJson(res);
 }

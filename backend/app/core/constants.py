@@ -1,4 +1,4 @@
-SUPPORTED_DB_TYPES = {"snowflake", "postgres", "mysql"}
+SUPPORTED_DB_TYPES = {"postgres", "mysql"}
 
 SUPPORTED_MODULES = {
     "CONNECTION_MANAGER",

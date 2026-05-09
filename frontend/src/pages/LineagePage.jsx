@@ -2344,6 +2344,7 @@ export default function LineagePage() {
                             databaseName={selectedDatabase}
                             schemaName={selectedSchema}
                             selectedObject={selectedObject}
+                            availableObjects={objectOptions}
                             currentTransformationSql={currentTransformationSqlForPipeline}
                             currentTransformationSource={currentTransformationSource}
                             pipelineSession={currentPipelineBuilderSession}

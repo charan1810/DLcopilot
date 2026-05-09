@@ -28,12 +28,12 @@ function usePersistentState(key, initialValue, storageType = "local") {
 }
 
 const DEFAULT_CONNECTION_PAYLOAD = {
-    name: "Local Postgres",
+    name: "DLcopilot Ecommerce Demo",
     db_type: "postgres",
     host: "localhost",
-    port: "5433",
+    port: "5432",
     database_name: "dlcopilot",
-    schema_name: "public",
+    schema_name: "src",
     username: "postgres",
     account: "",
     warehouse: "",
@@ -86,6 +86,7 @@ function createEmptyPipelineBuilderSession() {
         error: "",
         pipelineForm: null,
         stepForm: null,
+        starterConfig: null,
     };
 }
 

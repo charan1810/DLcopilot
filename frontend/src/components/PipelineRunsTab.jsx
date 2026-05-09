@@ -174,7 +174,7 @@ export default function PipelineRunsTab({
                 step.executed_sql || selectedPipeline?.steps?.find((s) => s.id === stepId)?.sql_text || "",
                 step.error_message,
                 {
-                    schema: selectedPipeline?.schema_name || "public",
+                    schema: selectedPipeline?.schema_name || "src",
                     object_name: selectedPipeline?.source_object || "",
                 }
             );

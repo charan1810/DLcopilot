@@ -3,12 +3,12 @@ import { saveConnection, testConnection, fetchSavedConnections } from "../api/sc
 import { useAppContext } from "../context/AppContext";
 
 const INITIAL_FORM = {
-  name: "Local Postgres",
+  name: "DLcopilot Ecommerce Demo",
   db_type: "postgres",
   host: "localhost",
-  port: "5433",
+  port: "5432",
   database_name: "dlcopilot",
-  schema_name: "public",
+  schema_name: "src",
   username: "postgres",
   password: "",
   account: "",
@@ -306,7 +306,7 @@ export default function ConnectionForm({ onConnectionSaved }) {
                 type="text"
                 value={form.schema_name}
                 onChange={(e) => updateField("schema_name", e.target.value)}
-                placeholder={isPostgres ? "public" : "optional"}
+                placeholder={isPostgres ? "src" : "optional"}
               />
             </div>
 
@@ -370,7 +370,7 @@ export default function ConnectionForm({ onConnectionSaved }) {
                 type="text"
                 value={form.schema_name}
                 onChange={(e) => updateField("schema_name", e.target.value)}
-                placeholder="PUBLIC"
+                placeholder="CORE"
               />
             </div>
 

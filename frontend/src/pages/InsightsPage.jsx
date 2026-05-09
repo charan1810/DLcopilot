@@ -20,6 +20,56 @@ function formatCellValue(value) {
     return String(value);
 }
 
+function buildAnswerSummary(result) {
+    const columns = result?.columns || [];
+    const rows = result?.rows || [];
+
+    if (!columns.length || !rows.length) {
+        return null;
+    }
+
+    if (rows.length === 1) {
+        const row = rows[0] || [];
+        const rowPairs = columns.slice(0, row.length).map((column, index) => ({
+            column,
+            value: formatCellValue(row[index]),
+        }));
+
+        if (rowPairs.length === 1) {
+            return {
+                headline: `${rowPairs[0].column}: ${rowPairs[0].value}`,
+                highlights: [],
+            };
+        }
+
+        return {
+            headline: rowPairs.slice(0, 4).map((item) => `${item.column}: ${item.value}`).join(" | "),
+            highlights: [],
+        };
+    }
+
+    const numericIndexes = [];
+    columns.forEach((_, index) => {
+        const hasNumeric = rows.some((row) => Number.isFinite(Number(row[index])));
+        if (hasNumeric) numericIndexes.push(index);
+    });
+
+    const metricIndex = numericIndexes[0] ?? -1;
+    const dimensionIndex = columns.findIndex((_, index) => !numericIndexes.includes(index));
+
+    if (metricIndex >= 0 && dimensionIndex >= 0) {
+        return {
+            headline: `Found ${rows.length} ${columns[dimensionIndex]} values with ${columns[metricIndex]} results.`,
+            highlights: rows.slice(0, 5).map((row) => `${formatCellValue(row[dimensionIndex])}: ${formatCellValue(row[metricIndex])}`),
+        };
+    }
+
+    return {
+        headline: `Returned ${rows.length} rows.`,
+        highlights: columns.slice(0, 4).map((column, index) => `${column}: ${formatCellValue(rows[0]?.[index])}`),
+    };
+}
+
 function InsightsResultTable({ result }) {
     if (!result) {
         return <div className="object-details-empty">No result preview yet.</div>;
@@ -256,11 +306,123 @@ function LoadingAssistantBubble({ hint, stageText }) {
     );
 }
 
+function buildConversationTurn(message, fallbackContext = null) {
+    const turn = {
+        role: message.role,
+        text: message.text,
+    };
+
+    const context = message.context || fallbackContext;
+    if (!context) {
+        return turn;
+    }
+
+    turn.context = context;
+
+    if (context.database) turn.database_name = context.database;
+    if (context.schema) turn.schema_name = context.schema;
+    if (context.object) turn.object_name = context.object;
+    if (Array.isArray(context.selected_objects) && context.selected_objects.length) {
+        turn.selected_objects = context.selected_objects;
+    }
+
+    return turn;
+}
+
+function buildConversationHistory(messages, currentMessage, fallbackContext = null) {
+    return [...messages, currentMessage]
+        .slice(-10)
+        .map((item, index, collection) => {
+            const isLatestTurn = index === collection.length - 1;
+            return buildConversationTurn(item, isLatestTurn ? fallbackContext : null);
+        });
+}
+
+const INSIGHTS_SESSION_STORAGE_KEY = "dc.insightsChatSession";
+
+function readInsightsSessionSnapshot() {
+    try {
+        const raw = window.sessionStorage.getItem(INSIGHTS_SESSION_STORAGE_KEY);
+        if (!raw) return null;
+
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function writeInsightsSessionSnapshot(snapshot) {
+    try {
+        window.sessionStorage.setItem(INSIGHTS_SESSION_STORAGE_KEY, JSON.stringify(snapshot));
+    } catch {
+        // ignore storage failures
+    }
+}
+
+function clearInsightsSessionSnapshot() {
+    try {
+        window.sessionStorage.removeItem(INSIGHTS_SESSION_STORAGE_KEY);
+    } catch {
+        // ignore storage failures
+    }
+}
+
+function isValidInsightsMessage(message) {
+    return !!message && typeof message === "object" && typeof message.role === "string" && typeof message.text === "string";
+}
+
+function buildInsightsScope({ user, connectionId, effectiveDatabase, defaultSchema }) {
+    return {
+        userKey: String(user?.id || user?.email || "anonymous"),
+        connectionId: connectionId || null,
+        database: effectiveDatabase || "",
+        schema: defaultSchema || "",
+    };
+}
+
+function isSameInsightsScope(left, right) {
+    return (
+        String(left?.userKey || "") === String(right?.userKey || "")
+        && (left?.connectionId || null) === (right?.connectionId || null)
+        && String(left?.database || "") === String(right?.database || "")
+        && String(left?.schema || "") === String(right?.schema || "")
+    );
+}
+
+function sanitizeInsightsSessionSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") {
+        return null;
+    }
+
+    return {
+        scope: snapshot.scope && typeof snapshot.scope === "object" ? snapshot.scope : null,
+        chatInput: typeof snapshot.chatInput === "string" ? snapshot.chatInput : "",
+        messages: Array.isArray(snapshot.messages) ? snapshot.messages.filter(isValidInsightsMessage).slice(-20) : [],
+        lastSql: typeof snapshot.lastSql === "string" ? snapshot.lastSql : "",
+        lastResult: snapshot.lastResult && typeof snapshot.lastResult === "object" ? snapshot.lastResult : null,
+        pendingDisambiguation:
+            snapshot.pendingDisambiguation && typeof snapshot.pendingDisambiguation === "object"
+                ? snapshot.pendingDisambiguation
+                : null,
+        chosenCandidates: Array.isArray(snapshot.chosenCandidates)
+            ? snapshot.chosenCandidates.filter((item) => typeof item === "string")
+            : [],
+        conversationContext:
+            snapshot.conversationContext && typeof snapshot.conversationContext === "object"
+                ? snapshot.conversationContext
+                : null,
+    };
+}
+
 function AssistantMessage({ message }) {
     const confidence = deriveConfidence(message);
     const showEvidenceBadges =
         !!message?.generationMeta || !!message?.retrievalContext || !!message?.result;
     const hasAnalyticsPanel = !!message.detected?.stats || (message.detected?.chart || []).length > 0;
+    const answerSummary = message?.answerSummary?.headline
+        ? message.answerSummary
+        : buildAnswerSummary(message.result);
 
     return (
         <article className="insights-bubble insights-bubble-assistant">
@@ -268,6 +430,20 @@ function AssistantMessage({ message }) {
 
             <div className={`insights-response-layout ${hasAnalyticsPanel ? "" : "single-column"}`}>
                 <section className="insights-summary-box">
+                    {answerSummary?.headline ? (
+                        <div className="insights-answer-box">
+                            <div className="insights-answer-label">Quick answer</div>
+                            <div className="insights-answer-headline">{answerSummary.headline}</div>
+                            {Array.isArray(answerSummary.highlights) && answerSummary.highlights.length > 0 ? (
+                                <div className="insights-answer-highlights">
+                                    {answerSummary.highlights.map((item) => (
+                                        <span key={item} className="insights-answer-chip">{item}</span>
+                                    ))}
+                                </div>
+                            ) : null}
+                        </div>
+                    ) : null}
+
                     <p className="insights-bubble-text">{message.text}</p>
 
                     {showEvidenceBadges ? (
@@ -371,12 +547,18 @@ export default function InsightsPage() {
     const [pendingDisambiguation, setPendingDisambiguation] = useState(null);
     const [chosenCandidates, setChosenCandidates] = useState([]);
     const [loadingHintIndex, setLoadingHintIndex] = useState(0);
+    const [conversationContext, setConversationContext] = useState(null);
 
     const messagesRef = useRef(null);
+    const restoreRef = useRef(false);
 
     const canUseAiFeatures = user?.role === "admin" || user?.role === "developer";
     const effectiveDatabase = connectionPayload?.database_name || "postgres";
-    const defaultSchema = connectionPayload?.schema_name || "public";
+    const defaultSchema = connectionPayload?.schema_name || "src";
+    const insightsScope = useMemo(
+        () => buildInsightsScope({ user, connectionId, effectiveDatabase, defaultSchema }),
+        [user, connectionId, effectiveDatabase, defaultSchema]
+    );
 
     const ensureActiveBackendConnection = async (forceNew = false) => {
         if (!forceNew && connectionId) return connectionId;
@@ -443,6 +625,86 @@ export default function InsightsPage() {
 
         return () => window.clearInterval(intervalId);
     }, [isSending, loadingHints.length]);
+
+    useEffect(() => {
+        if (restoreRef.current) {
+            return;
+        }
+
+        const savedSnapshot = sanitizeInsightsSessionSnapshot(readInsightsSessionSnapshot());
+        restoreRef.current = true;
+
+        if (!savedSnapshot || !savedSnapshot.scope || !isSameInsightsScope(savedSnapshot.scope, insightsScope)) {
+            clearInsightsSessionSnapshot();
+            return;
+        }
+
+        setChatInput(savedSnapshot.chatInput || "");
+        setMessages(savedSnapshot.messages || []);
+        setLastSql(savedSnapshot.lastSql || "");
+        setLastResult(savedSnapshot.lastResult || null);
+        setPendingDisambiguation(savedSnapshot.pendingDisambiguation || null);
+        setChosenCandidates(savedSnapshot.chosenCandidates || []);
+        setConversationContext(savedSnapshot.conversationContext || null);
+    }, [insightsScope]);
+
+    useEffect(() => {
+        if (!restoreRef.current) {
+            return;
+        }
+
+        const currentSnapshot = sanitizeInsightsSessionSnapshot(readInsightsSessionSnapshot());
+        if (currentSnapshot?.scope && !isSameInsightsScope(currentSnapshot.scope, insightsScope)) {
+            setChatInput("");
+            setMessages([]);
+            setGlobalError("");
+            setLastSql("");
+            setLastResult(null);
+            setPendingDisambiguation(null);
+            setChosenCandidates([]);
+            setConversationContext(null);
+            clearInsightsSessionSnapshot();
+        }
+    }, [insightsScope]);
+
+    useEffect(() => {
+        if (!restoreRef.current) {
+            return;
+        }
+
+        if (
+            !chatInput
+            && !messages.length
+            && !lastSql
+            && !pendingDisambiguation
+            && !chosenCandidates.length
+            && !conversationContext
+            && !lastResult
+        ) {
+            clearInsightsSessionSnapshot();
+            return;
+        }
+
+        writeInsightsSessionSnapshot({
+            scope: insightsScope,
+            chatInput,
+            messages: messages.slice(-20),
+            lastSql,
+            lastResult,
+            pendingDisambiguation,
+            chosenCandidates,
+            conversationContext,
+        });
+    }, [
+        chatInput,
+        chosenCandidates,
+        conversationContext,
+        insightsScope,
+        lastResult,
+        lastSql,
+        messages,
+        pendingDisambiguation,
+    ]);
 
     const scrollToBottom = () => {
         window.setTimeout(() => {
@@ -536,6 +798,9 @@ export default function InsightsPage() {
         }
 
         const resolvedContext = response?.context || null;
+        if (resolvedContext) {
+            setConversationContext(resolvedContext);
+        }
 
         const sql = response?.sql || "";
         setLastSql(sql);
@@ -557,12 +822,17 @@ export default function InsightsPage() {
 
         const generationMeta = response?.generation_meta || null;
         const retrievalContext = response?.retrieval_context || null;
+        const answerSummary = response?.answer_summary?.headline
+            ? response.answer_summary
+            : buildAnswerSummary(result);
         const assistantMessage = {
             id: Date.now() + 1,
             role: "assistant",
             text:
                 response?.assistant_response ||
                 buildNarrative(promptText, generationMeta, result, detected, resolvedContext),
+            answerSummary,
+            context: resolvedContext,
             generationMeta,
             retrievalContext,
             sql,
@@ -589,9 +859,7 @@ export default function InsightsPage() {
             role: "user",
             text: cleanPrompt,
         };
-        const historyWithCurrent = [...messages, userMessage]
-            .slice(-10)
-            .map((item) => ({ role: item.role, text: item.text }));
+        const historyWithCurrent = buildConversationHistory(messages, userMessage, conversationContext);
 
         setMessages((prev) => [...prev, userMessage]);
         setChatInput("");
@@ -708,6 +976,8 @@ export default function InsightsPage() {
                     id: Date.now() + 2,
                     role: "assistant",
                     text: "I re-ran the latest SQL and refreshed the evidence below.",
+                    answerSummary: buildAnswerSummary(result),
+                    context: conversationContext,
                     sql: lastSql,
                     result,
                     detected,
@@ -717,6 +987,18 @@ export default function InsightsPage() {
         } catch (err) {
             setGlobalError(err?.message || "Failed to rerun SQL");
         }
+    };
+
+    const startNewChat = () => {
+        setChatInput("");
+        setMessages([]);
+        setGlobalError("");
+        setLastSql("");
+        setLastResult(null);
+        setPendingDisambiguation(null);
+        setChosenCandidates([]);
+        setConversationContext(null);
+        clearInsightsSessionSnapshot();
     };
 
     return (
@@ -731,6 +1013,14 @@ export default function InsightsPage() {
                     </p>
                 </div>
                 <div className="insights-hero-actions">
+                    <button
+                        type="button"
+                        className="secondary-btn"
+                        onClick={startNewChat}
+                        disabled={isSending || (!messages.length && !chatInput && !lastSql && !pendingDisambiguation)}
+                    >
+                        New Chat
+                    </button>
                     <button type="button" className="secondary-btn" onClick={rerunLast} disabled={isSending}>
                         Re-run Last Insight
                     </button>

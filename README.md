@@ -23,7 +23,7 @@ frontend/  React + Vite application
 - Python 3.10+
 - Node.js 18+
 - npm
-- A database for `APP_DB_URL` used by SQLAlchemy
+- A PostgreSQL database for `APP_DB_URL`; local development uses a single `dlcopilot` database
 
 ## Environment Setup
 
@@ -92,6 +92,33 @@ Example (PowerShell):
 $env:VITE_API_BASE_URL="http://localhost:8000"
 npm run dev
 ```
+
+## Single Database Layout
+
+Local development uses one PostgreSQL database: `dlcopilot`.
+
+- `src` schema: business/demo tables and analytics views used for exploration
+- `public` schema: backend auth tables such as `users`, `connections`, and `module_access`
+- `app_store` schema: saved connections, recipes, prompt history, and pipeline builder state used by legacy routes
+- `CORE` schema: reserved empty schema for future curated/core-layer objects
+
+The project no longer depends on `backend/app/copilot_app.db` for runtime app data.
+
+## Seed Demo Data
+
+To rebuild the local `dlcopilot` PostgreSQL database with a realistic e-commerce dataset and reset the old saved connection list:
+
+```powershell
+python backend/scripts/seed_demo_environment.py
+```
+
+What this does:
+
+- Rebuilds the `src` schema inside `dlcopilot` with a small, business-friendly e-commerce model (roughly 4.5k rows total) across customers, products, orders, order items, inventory, payments, shipments, reviews, returns, and analytics views.
+- Ensures an empty `CORE` schema exists.
+- Updates saved app connections to use `src` as the default schema.
+
+If the backend is already running, restart it after seeding so startup logs and in-memory state are refreshed.
 
 ## Deploy Frontend on GitHub Pages
 

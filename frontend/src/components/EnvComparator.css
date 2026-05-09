@@ -1,0 +1,111 @@
+.envtools-card {
+    border: 1px solid var(--line-soft);
+}
+
+.envtools-table-wrap {
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--surface-elev);
+}
+
+.envtools-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.84rem;
+}
+
+.envtools-table thead {
+    background: var(--surface-3);
+}
+
+.envtools-table th,
+.envtools-table td {
+    text-align: left;
+    border-bottom: 1px solid var(--line-soft);
+    padding: 10px 12px;
+}
+
+.envtools-table tbody tr {
+    cursor: pointer;
+}
+
+.envtools-table tbody tr:hover {
+    background: rgba(76, 128, 255, 0.08);
+}
+
+.envtools-table tbody tr.selected {
+    background: rgba(76, 128, 255, 0.16);
+}
+
+.envtools-empty-row {
+    text-align: center;
+    color: var(--text-dim);
+}
+
+.envtools-status {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 2px 8px;
+    text-transform: uppercase;
+}
+
+.envtools-status.success {
+    color: #16a34a;
+    border-color: rgba(22, 163, 74, 0.38);
+    background: rgba(22, 163, 74, 0.14);
+}
+
+.envtools-status.error {
+    color: #dc2626;
+    border-color: rgba(220, 38, 38, 0.36);
+    background: rgba(220, 38, 38, 0.12);
+}
+
+.envtools-status.warning {
+    color: #b45309;
+    border-color: rgba(180, 83, 9, 0.32);
+    background: rgba(180, 83, 9, 0.14);
+}
+
+.envtools-status.neutral {
+    color: var(--text-dim);
+    border-color: var(--line-soft);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.envtools-detail-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.envtools-note-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 4px;
+    color: var(--text-muted);
+}
+
+.envtools-two-col {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.envtools-code {
+    max-height: 320px;
+    overflow: auto;
+}
+
+@media (max-width: 1080px) {
+    .envtools-two-col {
+        grid-template-columns: 1fr;
+    }
+}

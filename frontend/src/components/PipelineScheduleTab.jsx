@@ -31,7 +31,7 @@ export default function PipelineScheduleTab({
         schedule_type: "interval",
         cron_expression: "",
         interval_minutes: 60,
-        is_active: 1,
+        is_active: true,
     };
 
     const [form, setForm] = useState(DEFAULT_FORM);
@@ -48,7 +48,7 @@ export default function PipelineScheduleTab({
                     schedule_type: data.schedule_type || "interval",
                     cron_expression: data.cron_expression || "",
                     interval_minutes: data.interval_minutes || 60,
-                    is_active: data.is_active ?? 1,
+                    is_active: data.is_active ?? true,
                 });
             } else if (data?.schedule && data.schedule.id) {
                 setSchedule(data.schedule);
@@ -57,7 +57,7 @@ export default function PipelineScheduleTab({
                     schedule_type: data.schedule.schedule_type || "interval",
                     cron_expression: data.schedule.cron_expression || "",
                     interval_minutes: data.schedule.interval_minutes || 60,
-                    is_active: data.schedule.is_active ?? 1,
+                    is_active: data.schedule.is_active ?? true,
                 });
             } else {
                 setSchedule(null);
@@ -152,7 +152,7 @@ export default function PipelineScheduleTab({
     }
 
     function handleToggleActive() {
-        setForm((prev) => ({ ...prev, is_active: prev.is_active ? 0 : 1 }));
+        setForm((prev) => ({ ...prev, is_active: !prev.is_active }));
     }
 
     if (!pipelineId) {

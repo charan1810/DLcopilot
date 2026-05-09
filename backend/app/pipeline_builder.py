@@ -2,11 +2,11 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 from datetime import datetime, timezone
-import sqlite3
+import json
 import logging
 import re
-from pathlib import Path
 
+from app.core.app_store import AppStoreOperationalError, get_app_store_conn, init_app_store
 from app.core.security import get_current_user, require_role
 
 try:
@@ -20,138 +20,48 @@ _dev_or_admin = require_role("admin", "developer")
 
 router = APIRouter(prefix="/api", tags=["pipeline-builder"])
 
-# Must point to the SAME SQLite app DB used by main.py
-APP_DB_PATH = Path(__file__).resolve().parent / "copilot_app.db"
-
-
 def utc_now_str() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
 
 
 def get_sqlite_conn():
-    conn = sqlite3.connect(APP_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return get_app_store_conn()
 
 
 def row_to_dict(row) -> Dict[str, Any]:
     return dict(row) if row else {}
 
 
-def ensure_pipeline_tables():
-    conn = get_sqlite_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS pipelines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            description TEXT,
-            connection_id INTEGER NOT NULL,
-            database_name TEXT,
-            schema_name TEXT,
-            source_object TEXT,
-            target_object TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS pipeline_steps (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pipeline_id INTEGER NOT NULL,
-            step_order INTEGER NOT NULL,
-            step_name TEXT NOT NULL,
-            step_type TEXT NOT NULL DEFAULT 'sql',
-            sql_text TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS pipeline_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pipeline_id INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'PENDING',
-            trigger_type TEXT NOT NULL DEFAULT 'MANUAL',
-            started_at TEXT NOT NULL,
-            ended_at TEXT,
-            duration_seconds REAL,
-            total_steps INTEGER NOT NULL DEFAULT 0,
-            success_steps INTEGER NOT NULL DEFAULT 0,
-            failed_steps INTEGER NOT NULL DEFAULT 0,
-            error_message TEXT,
-            initiated_by TEXT,
-            run_log TEXT,
-            FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS pipeline_run_steps (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pipeline_run_id INTEGER NOT NULL,
-            pipeline_id INTEGER NOT NULL,
-            step_id INTEGER NOT NULL,
-            step_order INTEGER NOT NULL,
-            step_name TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'PENDING',
-            execution_order INTEGER DEFAULT 0,
-            started_at TEXT,
-            ended_at TEXT,
-            duration_seconds REAL,
-            executed_sql TEXT,
-            rows_affected INTEGER DEFAULT 0,
-            error_message TEXT,
-            step_log TEXT,
-            FOREIGN KEY (pipeline_run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE,
-            FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE,
-            FOREIGN KEY (step_id) REFERENCES pipeline_steps(id) ON DELETE CASCADE
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS pipeline_schedules (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pipeline_id INTEGER NOT NULL UNIQUE,
-            schedule_type TEXT NOT NULL DEFAULT 'interval',
-            cron_expression TEXT,
-            interval_minutes INTEGER,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            last_run_at TEXT,
-            next_run_at TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE
-        )
-    """)
-
-    _migrate_pipeline_tables(conn)
-    conn.commit()
-    conn.close()
+def _serialize_mapping_config(mapping_config: Any) -> str:
+    if not mapping_config:
+        return "{}"
+    return json.dumps(mapping_config)
 
 
-def _migrate_pipeline_tables(conn):
-    """Add new columns to existing tables if they don't exist yet."""
-    cur = conn.cursor()
-    migrations = [
-        ("pipeline_runs", "trigger_type", "TEXT NOT NULL DEFAULT 'MANUAL'"),
-        ("pipeline_runs", "duration_seconds", "REAL"),
-        ("pipeline_runs", "error_message", "TEXT"),
-        ("pipeline_runs", "initiated_by", "TEXT"),
-        ("pipeline_run_steps", "execution_order", "INTEGER DEFAULT 0"),
-        ("pipeline_run_steps", "duration_seconds", "REAL"),
-        ("pipeline_run_steps", "executed_sql", "TEXT"),
-    ]
-    for table, column, col_type in migrations:
+def _parse_mapping_config(raw_value: Any) -> Dict[str, Any]:
+    if isinstance(raw_value, dict):
+        return raw_value
+    if not raw_value:
+        return {}
+    if isinstance(raw_value, str):
         try:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+            parsed = json.loads(raw_value)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def hydrate_pipeline_record(row) -> Dict[str, Any]:
+    data = row_to_dict(row)
+    if not data:
+        return {}
+    data["mapping_config"] = _parse_mapping_config(data.get("mapping_config"))
+    return data
+
+
+def ensure_pipeline_tables():
+    init_app_store()
 
 
 def get_connection_row(connection_id: int):
@@ -165,11 +75,11 @@ def get_connection_row(connection_id: int):
             WHERE id = ?
         """, (connection_id,))
         row = cur.fetchone()
-    except sqlite3.OperationalError as e:
+    except AppStoreOperationalError as e:
         conn.close()
         raise HTTPException(
             status_code=500,
-            detail=f"Connections table issue: {str(e)}. Ensure main.py creates the connections table in copilot_app.db."
+            detail=f"Connections table issue: {str(e)}. Ensure the PostgreSQL app_store schema is initialized."
         )
 
     conn.close()
@@ -177,7 +87,7 @@ def get_connection_row(connection_id: int):
     if not row:
         raise HTTPException(
             status_code=404,
-            detail="Connection not found. Save the connection again from the UI so it is written into SQLite."
+            detail="Connection not found. Save the connection again from the UI so it is written into PostgreSQL."
         )
 
     return row
@@ -230,7 +140,7 @@ def fetch_pipeline_with_steps(pipeline_id: int):
 
     conn.close()
 
-    data = row_to_dict(pipeline)
+    data = hydrate_pipeline_record(pipeline)
     data["steps"] = [row_to_dict(s) for s in steps]
     return data
 
@@ -427,6 +337,7 @@ class PipelineCreate(BaseModel):
     schema_name: Optional[str] = ""
     source_object: Optional[str] = ""
     target_object: Optional[str] = ""
+    mapping_config: Optional[Dict[str, Any]] = None
 
 
 class PipelineUpdate(BaseModel):
@@ -437,19 +348,20 @@ class PipelineUpdate(BaseModel):
     schema_name: Optional[str] = ""
     source_object: Optional[str] = ""
     target_object: Optional[str] = ""
+    mapping_config: Optional[Dict[str, Any]] = None
 
 
 class PipelineStepCreate(BaseModel):
     step_name: str
     step_type: str = "sql"
     sql_text: str
-    is_active: int = 1
+    is_active: bool = True
 
 
 class PipelineStepUpdate(BaseModel):
     step_name: Optional[str] = None
     sql_text: Optional[str] = None
-    is_active: Optional[int] = None
+    is_active: Optional[bool] = None
 
 
 class PipelineImportStepsRequest(BaseModel):
@@ -474,17 +386,27 @@ class PipelineScheduleCreate(BaseModel):
     schedule_type: str = "interval"
     cron_expression: Optional[str] = None
     interval_minutes: Optional[int] = None
-    is_active: int = 1
+    is_active: bool = True
 
 
 class PipelineScheduleUpdate(BaseModel):
     schedule_type: Optional[str] = None
     cron_expression: Optional[str] = None
     interval_minutes: Optional[int] = None
-    is_active: Optional[int] = None
+    is_active: Optional[bool] = None
 
 
 ensure_pipeline_tables()
+
+
+def _is_active_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    return bool(value)
 
 
 @router.get("/pipelines")
@@ -518,7 +440,7 @@ def list_pipelines(
     rows = cur.fetchall()
     conn.close()
 
-    return [row_to_dict(r) for r in rows]
+    return [hydrate_pipeline_record(r) for r in rows]
 
 
 @router.post("/pipelines")
@@ -531,9 +453,9 @@ def create_pipeline(payload: PipelineCreate, _u=Depends(_dev_or_admin)):
     cur.execute("""
         INSERT INTO pipelines (
             name, description, connection_id, database_name, schema_name,
-            source_object, target_object, created_at, updated_at
+            source_object, target_object, mapping_config, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         payload.name,
         payload.description,
@@ -542,6 +464,7 @@ def create_pipeline(payload: PipelineCreate, _u=Depends(_dev_or_admin)):
         payload.schema_name,
         payload.source_object,
         payload.target_object,
+        _serialize_mapping_config(payload.mapping_config),
         now,
         now
     ))
@@ -591,7 +514,7 @@ def update_pipeline(pipeline_id: int, payload: PipelineUpdate, _u=Depends(_dev_o
     cur.execute("""
         UPDATE pipelines
         SET name = ?, description = ?, connection_id = ?, database_name = ?,
-            schema_name = ?, source_object = ?, target_object = ?, updated_at = ?
+            schema_name = ?, source_object = ?, target_object = ?, mapping_config = ?, updated_at = ?
         WHERE id = ?
     """, (
         payload.name,
@@ -601,6 +524,7 @@ def update_pipeline(pipeline_id: int, payload: PipelineUpdate, _u=Depends(_dev_o
         payload.schema_name,
         payload.source_object,
         payload.target_object,
+        _serialize_mapping_config(payload.mapping_config),
         now,
         pipeline_id
     ))
@@ -886,7 +810,10 @@ def _run_pipeline(
 ):
     """Core execution engine for running a pipeline."""
     pipeline = fetch_pipeline_with_steps(pipeline_id)
-    all_active_steps = [s for s in pipeline.get("steps", []) if int(s.get("is_active", 1)) == 1]
+    all_active_steps = [
+        s for s in pipeline.get("steps", [])
+        if _is_active_flag(s.get("is_active", True))
+    ]
 
     if not all_active_steps:
         raise HTTPException(status_code=400, detail="No active steps found in pipeline")
@@ -1321,7 +1248,7 @@ def _load_all_schedules():
     """Register all active schedules from the DB at startup."""
     conn = get_sqlite_conn()
     cur = conn.cursor()
-    cur.execute("SELECT pipeline_id FROM pipeline_schedules WHERE is_active = 1")
+    cur.execute("SELECT pipeline_id FROM pipeline_schedules WHERE is_active = TRUE")
     rows = cur.fetchall()
     conn.close()
     for row in rows:

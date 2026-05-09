@@ -1,0 +1,103 @@
+.optimizer-grid-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.optimizer-sql-input {
+    min-height: 220px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.optimizer-chip-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.optimizer-chip {
+    border: 1px solid var(--line-soft);
+    background: var(--surface-elev);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+    font-size: 0.78rem;
+}
+
+.optimizer-chip.selected {
+    border-color: var(--line-strong);
+    background: rgba(76, 128, 255, 0.18);
+    color: var(--text-strong);
+}
+
+.optimizer-pill-wrap {
+    margin-top: 10px;
+}
+
+.optimizer-candidate-box {
+    margin-top: 12px;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--surface-elev);
+}
+
+.optimizer-candidate-btn {
+    text-align: left;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    padding: 8px;
+    cursor: pointer;
+}
+
+.optimizer-candidate-btn:hover {
+    background: rgba(76, 128, 255, 0.12);
+}
+
+.optimizer-code-stack {
+    display: grid;
+    gap: 12px;
+}
+
+.optimizer-check-grid {
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.optimizer-explain-columns {
+    margin-top: 12px;
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.optimizer-benchmark-grid {
+    margin-top: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+@media (max-width: 1180px) {
+    .optimizer-grid-4 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .optimizer-check-grid,
+    .optimizer-explain-columns {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 760px) {
+    .optimizer-grid-4,
+    .optimizer-check-grid,
+    .optimizer-explain-columns {
+        grid-template-columns: 1fr;
+    }
+}

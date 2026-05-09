@@ -5,9 +5,7 @@ import psycopg2
 import os
 import json
 import re
-import sqlite3
 from difflib import SequenceMatcher
-from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Any, Dict
 from openai import OpenAI
@@ -16,6 +14,8 @@ from app.pipeline_builder import router as pipeline_builder_router
 from app.pipeline_builder import set_scheduler as set_pipeline_scheduler
 from app.api.routes_auth import router as auth_router
 from app.api.routes_admin import router as admin_router
+from app.api.routes_env_tools import router as env_tools_router
+from app.core.app_store import AppStoreOperationalError, get_app_store_conn, init_app_store
 from app.core.security import get_current_user, require_role
 
 
@@ -42,6 +42,7 @@ app = FastAPI(title="Data Lifecycle Copilot")
 app.include_router(pipeline_builder_router)
 app.include_router(auth_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
+app.include_router(env_tools_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,11 +57,12 @@ next_connection_id = 1
 
 
 def _load_saved_connections():
-    """Reload connections from SQLite into memory on startup."""
+    """Reload shared saved connections from the PostgreSQL app store."""
     global next_connection_id
+    saved_connections.clear()
     conn = get_app_store_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM connections WHERE is_active = 1")
+    cur.execute("SELECT * FROM connections WHERE is_active = TRUE")
     rows = cur.fetchall()
     max_id = 0
     for row in rows:
@@ -71,79 +73,11 @@ def _load_saved_connections():
             max_id = cid
     next_connection_id = max_id + 1
     conn.close()
-    print(f"Loaded {len(rows)} saved connection(s) from SQLite (next_id={next_connection_id}).")
+    print(f"Loaded {len(rows)} saved connection(s) from PostgreSQL app_store (next_id={next_connection_id}).")
 
 # ── Auth shortcuts for inline routes ──
 _any_authenticated = Depends(get_current_user)
 _dev_or_admin = Depends(require_role("admin", "developer"))
-
-
-# =========================
-# Local app store (SQLite)
-# =========================
-APP_DB_PATH = Path(__file__).resolve().parent / "copilot_app.db"
-
-
-def get_app_store_conn():
-    conn = sqlite3.connect(APP_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_app_store():
-    conn = get_app_store_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS recipes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            connection_id INTEGER,
-            database_name TEXT,
-            schema_name TEXT,
-            object_name TEXT,
-            recipe_name TEXT,
-            user_prompt TEXT,
-            statement_type TEXT,
-            selected_tables_json TEXT,
-            sql_text TEXT,
-            explanation TEXT,
-            created_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS prompt_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            connection_id INTEGER,
-            database_name TEXT,
-            schema_name TEXT,
-            object_name TEXT,
-            user_prompt TEXT,
-            statement_type TEXT,
-            sql_text TEXT,
-            created_at TEXT
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS connections (
-            id INTEGER PRIMARY KEY,
-            name TEXT,
-            db_type TEXT,
-            host TEXT,
-            port TEXT,
-            database_name TEXT,
-            schema_name TEXT,
-            username TEXT,
-            password TEXT,
-            account TEXT,
-            warehouse TEXT,
-            role TEXT,
-            is_active INTEGER DEFAULT 1
-        )
-    """)
-
-    conn.commit()
-    conn.close()
 
 
 @app.on_event("startup")
@@ -217,7 +151,7 @@ class ConnectionRequest(BaseModel):
     host: str
     port: str
     database_name: str | None = "postgres"
-    schema_name: str | None = "public"
+    schema_name: str | None = "src"
     username: str
     password: str | None = ""
     account: str | None = ""
@@ -254,7 +188,7 @@ class JoinSuggestionRequest(SchemaAliasedRequest):
 class FixSqlRequest(SchemaAliasedRequest):
     connection_id: int
     database_name: str
-    schema_name: Optional[str] = Field(default="public", alias="schema")
+    schema_name: Optional[str] = Field(default="src", alias="schema")
     object_name: Optional[str] = None
     sql: str
     error: str
@@ -263,10 +197,10 @@ class FixSqlRequest(SchemaAliasedRequest):
 class InsightsAgenticRAGRequest(SchemaAliasedRequest):
     connection_id: int
     database_name: Optional[str] = None
-    schema_name: Optional[str] = Field(default="public", alias="schema")
+    schema_name: Optional[str] = Field(default="src", alias="schema")
     object_name: Optional[str] = None
     user_prompt: str
-    conversation_history: List[Dict[str, str]] = Field(default_factory=list)
+    conversation_history: List[Dict[str, Any]] = Field(default_factory=list)
     selected_objects: List[str] = Field(default_factory=list)
 
 
@@ -323,8 +257,24 @@ def quote_ident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
+def get_saved_connection(conn_id: int):
+    conn = get_app_store_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM connections WHERE id = ? AND is_active = TRUE", (conn_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        saved_connections.pop(conn_id, None)
+        return None
+
+    conn_data = dict(row)
+    saved_connections[conn_id] = conn_data
+    return conn_data
+
+
 def get_db_connection_by_id(conn_id: int, database_name: str | None = None):
-    conn_data = saved_connections.get(conn_id)
+    conn_data = get_saved_connection(conn_id)
     if not conn_data:
         raise HTTPException(status_code=404, detail="Connection not found")
 
@@ -339,7 +289,10 @@ def get_db_connection_by_id(conn_id: int, database_name: str | None = None):
 
 def run_query(connection, query: str, params=None):
     cur = connection.cursor()
-    cur.execute(query, params or [])
+    if params is None:
+        cur.execute(query)
+    else:
+        cur.execute(query, params)
     return cur
 
 
@@ -485,6 +438,562 @@ def get_all_schema_objects(connection):
             "type": "VIEW" if r[2] == "VIEW" else "TABLE",
         }
         for r in rows
+    ]
+
+
+def get_user_schema_names(connection):
+    cur = run_query(
+        connection,
+        """
+        SELECT schema_name
+        FROM information_schema.schemata
+        WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'app_store')
+          AND schema_name NOT LIKE 'pg_toast%'
+          AND schema_name NOT LIKE 'pg_temp_%'
+        ORDER BY
+            CASE
+                WHEN LOWER(schema_name) = 'src' THEN 0
+                WHEN LOWER(schema_name) = 'core' THEN 1
+                WHEN LOWER(schema_name) = 'public' THEN 2
+                ELSE 10
+            END,
+            schema_name
+        """,
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return [row[0] for row in rows]
+
+
+_AGENTIC_LAYER_PATTERN_RE = re.compile(
+    r"\b(core|curated|stage|staging|history|historical|hist|dimension|dim|mart|analytics)\s+(?:layer|schema)\b",
+    re.IGNORECASE,
+)
+_AGENTIC_TARGET_REFERENCE_PATTERNS = [
+    re.compile(
+        r'\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*))?)',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'\b(?:create|build|make|generate|copy|load|write|populate|insert(?:\s+into)?|merge(?:\s+into)?|upsert(?:\s+into)?)\s+(?:a\s+|an\s+|the\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*))?)\s+(?:table|view|object)\b',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'\b(?:into|to)\s+((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*))?)\s+(?:table|view|object)\b',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'\b(?:into|to)\s+((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*)){1,2})(?=(?:\s|$|[,.;]))',
+        re.IGNORECASE,
+    ),
+]
+_AGENTIC_LAYER_SCHEMA_ALIASES = {
+    "core": ("core", "curated_core", "core_layer"),
+    "curated": ("core", "curated_core", "core_layer"),
+    "stage": ("stage", "staging", "stg", "src"),
+    "staging": ("staging", "stage", "stg", "src"),
+    "history": ("history", "hist", "archive"),
+    "historical": ("history", "hist", "archive"),
+    "hist": ("history", "hist", "archive"),
+    "dimension": ("dim", "dimension"),
+    "dim": ("dim", "dimension"),
+    "mart": ("mart", "analytics", "reporting"),
+    "analytics": ("analytics", "mart", "reporting"),
+}
+_AGENTIC_LAYER_DEFAULT_SCHEMA_NAMES = {
+    "core": "CORE",
+    "curated": "CORE",
+    "stage": "stage",
+    "staging": "staging",
+    "history": "history",
+    "historical": "history",
+    "hist": "history",
+    "dimension": "dim",
+    "dim": "dim",
+    "mart": "mart",
+    "analytics": "analytics",
+}
+
+
+def _is_specific_relation_name(value: str) -> bool:
+    normalized = normalize_sql_identifier(value)
+    return bool(normalized and "*" not in normalized)
+
+
+def resolve_schema_hint(schema_hint: str, available_schemas: List[str]) -> str:
+    cleaned = unquote_sql_identifier(schema_hint).strip()
+    if not cleaned:
+        return ""
+
+    exact_match = next((schema for schema in available_schemas if schema.lower() == cleaned.lower()), None)
+    if exact_match:
+        return exact_match
+
+    alias_candidates = _AGENTIC_LAYER_SCHEMA_ALIASES.get(cleaned.lower(), (cleaned,))
+    for alias in alias_candidates:
+        exact_match = next((schema for schema in available_schemas if schema.lower() == alias.lower()), None)
+        if exact_match:
+            return exact_match
+
+    contains_matches = [
+        schema
+        for schema in available_schemas
+        if any(alias.lower() in schema.lower() for alias in alias_candidates)
+    ]
+    if contains_matches:
+        contains_matches.sort(key=lambda value: (len(value), value.lower()))
+        return contains_matches[0]
+
+    return _AGENTIC_LAYER_DEFAULT_SCHEMA_NAMES.get(cleaned.lower(), cleaned)
+
+
+def extract_agentic_target_reference(user_requirement: str) -> tuple[str, str]:
+    text = (user_requirement or "").strip()
+    if not text:
+        return "", ""
+
+    for pattern in _AGENTIC_TARGET_REFERENCE_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        relation = split_relation_name(match.group(1), "")
+        if relation:
+            return relation
+
+    return "", ""
+
+
+def extract_agentic_layer_hint(user_requirement: str) -> str:
+    match = _AGENTIC_LAYER_PATTERN_RE.search(user_requirement or "")
+    return match.group(1) if match else ""
+
+
+def parse_pipeline_target_reference(target_object: str, default_schema: str) -> tuple[str, str]:
+    relation = split_relation_name(target_object or "", default_schema)
+    if not relation:
+        return "", ""
+
+    schema_name, object_name = relation
+    if not _is_specific_relation_name(object_name):
+        return schema_name, ""
+
+    return schema_name, object_name
+
+
+def normalize_pipeline_mapping_config(raw_mapping_config: Any) -> Dict[str, Any]:
+    if isinstance(raw_mapping_config, dict):
+        return raw_mapping_config
+    if not raw_mapping_config:
+        return {}
+    if isinstance(raw_mapping_config, str):
+        try:
+            parsed = json.loads(raw_mapping_config)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def get_pipeline_mapping_target_reference(
+    mapping_config: Dict[str, Any],
+    default_schema: str,
+) -> tuple[str, str]:
+    target_config = mapping_config.get("target") if isinstance(mapping_config, dict) else None
+    if not isinstance(target_config, dict):
+        return "", ""
+
+    target_schema = normalize_sql_identifier(target_config.get("schema") or "")
+    target_object = normalize_sql_identifier(target_config.get("object") or "")
+    if target_schema and target_object:
+        return target_schema, target_object
+
+    target_label = target_config.get("label") or ""
+    return parse_pipeline_target_reference(target_label, default_schema)
+
+
+def get_pipeline_mapping_columns(mapping_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    columns = mapping_config.get("columns") if isinstance(mapping_config, dict) else None
+    if not isinstance(columns, list):
+        return []
+
+    normalized_columns: List[Dict[str, Any]] = []
+    for column in columns:
+        if not isinstance(column, dict):
+            continue
+        if column.get("include") is False:
+            continue
+
+        target_column = normalize_sql_identifier(column.get("target_column") or "")
+        if not target_column:
+            continue
+
+        source_column = normalize_sql_identifier(column.get("source_column") or "")
+        data_type = str(column.get("data_type") or "text").strip() or "text"
+        normalized_columns.append({
+            "source_column": source_column,
+            "target_column": target_column,
+            "data_type": data_type,
+            "is_nullable": "YES" if bool(column.get("is_nullable", True)) else "NO",
+        })
+
+    return normalized_columns
+
+
+def build_pipeline_mapping_block(
+    mapping_columns: List[Dict[str, Any]],
+    target_schema: str,
+    target_object: str,
+) -> str:
+    if not mapping_columns or not target_schema or not target_object:
+        return ""
+
+    lines = [f'Saved target mapping: "{target_schema}"."{target_object}"']
+    for column in mapping_columns:
+        nullable = "NULL" if column.get("is_nullable") == "YES" else "NOT NULL"
+        source_note = f' <- {column["source_column"]}' if column.get("source_column") else " <- manual"
+        lines.append(
+            f'  - {column["target_column"]} ({column.get("data_type", "text")}, {nullable}){source_note}'
+        )
+
+    return "\n".join(lines)
+
+
+def _mapping_name_variants(name: str) -> set[str]:
+    cleaned = normalize_sql_identifier(name or "").lower()
+    if not cleaned:
+        return set()
+
+    variants = {cleaned, cleaned.replace("_", "")}
+    if cleaned.endswith("_id"):
+        variants.add(cleaned[:-3])
+        variants.add(cleaned[:-3].replace("_", ""))
+    if cleaned.endswith("s") and not cleaned.endswith("ss"):
+        variants.add(cleaned[:-1])
+    return {variant for variant in variants if variant}
+
+
+def suggest_mapping_columns_fallback(
+    source_columns: List[Dict[str, Any]],
+    target_columns: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    suggestions: List[Dict[str, Any]] = []
+    used_source_columns: set[str] = set()
+
+    for target in target_columns:
+        target_name = normalize_sql_identifier(target.get("target_column") or "")
+        if not target_name:
+            suggestions.append({
+                "target_column": target_name,
+                "source_column": "",
+                "reason": "Target column name is blank.",
+                "confidence": 0,
+            })
+            continue
+
+        target_variants = _mapping_name_variants(target_name)
+        target_type = str(target.get("data_type") or "").lower()
+        best_match = None
+        best_score = 0.0
+
+        for source in source_columns:
+            source_name = normalize_sql_identifier(source.get("column_name") or "")
+            if not source_name or source_name.lower() in used_source_columns:
+                continue
+
+            source_variants = _mapping_name_variants(source_name)
+            score = SequenceMatcher(None, target_name.lower(), source_name.lower()).ratio()
+            if target_variants & source_variants:
+                score = max(score, 0.96)
+
+            source_type = str(source.get("data_type") or "").lower()
+            if target_type and source_type and target_type == source_type:
+                score += 0.03
+
+            if score > best_score:
+                best_score = score
+                best_match = source_name
+
+        if best_match and best_score >= 0.58:
+            used_source_columns.add(best_match.lower())
+            suggestions.append({
+                "target_column": target_name,
+                "source_column": best_match,
+                "reason": "Best metadata similarity match.",
+                "confidence": round(min(best_score, 0.99), 2),
+            })
+        else:
+            suggestions.append({
+                "target_column": target_name,
+                "source_column": "",
+                "reason": "No confident fallback match found.",
+                "confidence": round(best_score, 2),
+            })
+
+    return suggestions
+
+
+def suggest_mapping_columns_with_llm(
+    source_columns: List[Dict[str, Any]],
+    target_columns: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not OPENAI_API_KEY or client is None:
+        return suggest_mapping_columns_fallback(source_columns, target_columns)
+
+    system_prompt = """You map source database columns to target database columns for an ETL pipeline.
+
+Return STRICT JSON only:
+{
+  \"mappings\": [
+    {
+      \"target_column\": \"target_name\",
+      \"source_column\": \"source_name or empty string\",
+      \"confidence\": 0.0,
+      \"reason\": \"short reason\"
+    }
+  ]
+}
+
+Rules:
+- Use only source and target column names that appear in the input.
+- Map at most one source column to each target column.
+- Prefer semantic name similarity and compatible data types.
+- If no good source exists, return an empty source_column.
+- Do not invent columns or explanations outside the JSON.
+"""
+
+    user_prompt = json.dumps({
+        "source_columns": source_columns,
+        "target_columns": target_columns,
+    }, indent=2)
+
+    llm_res = call_llm_json(system_prompt, user_prompt)
+    content = llm_res.get("content") if llm_res else None
+    mappings = content.get("mappings") if isinstance(content, dict) else None
+
+    if not isinstance(mappings, list):
+        return suggest_mapping_columns_fallback(source_columns, target_columns)
+
+    source_names = {
+        normalize_sql_identifier(column.get("column_name") or "").lower(): normalize_sql_identifier(column.get("column_name") or "")
+        for column in source_columns
+        if column.get("column_name")
+    }
+    target_names = {
+        normalize_sql_identifier(column.get("target_column") or "").lower(): normalize_sql_identifier(column.get("target_column") or "")
+        for column in target_columns
+        if column.get("target_column")
+    }
+
+    validated: List[Dict[str, Any]] = []
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        target_name = normalize_sql_identifier(mapping.get("target_column") or "")
+        source_name = normalize_sql_identifier(mapping.get("source_column") or "")
+        if target_name.lower() not in target_names:
+            continue
+        if source_name and source_name.lower() not in source_names:
+            source_name = ""
+        validated.append({
+            "target_column": target_names[target_name.lower()],
+            "source_column": source_names.get(source_name.lower(), "") if source_name else "",
+            "reason": str(mapping.get("reason") or "").strip() or "LLM suggestion",
+            "confidence": float(mapping.get("confidence") or 0),
+        })
+
+    if not validated:
+        return suggest_mapping_columns_fallback(source_columns, target_columns)
+
+    return validated
+
+
+class PipelineMappingSuggestionRequest(BaseModel):
+    connection_id: int
+    database_name: Optional[str] = ""
+    source_schema: str
+    source_object: str
+    target_schema: Optional[str] = ""
+    target_object: Optional[str] = ""
+    mapping_config: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/pipeline-mapping/ai-suggest")
+def ai_suggest_pipeline_mapping(
+    payload: PipelineMappingSuggestionRequest,
+    _u=_dev_or_admin,
+):
+    db_conn = get_db_connection_by_id(payload.connection_id, (payload.database_name or "").strip() or None)
+    try:
+        source_columns = get_object_columns(db_conn, payload.source_schema, payload.source_object)
+        if not source_columns:
+            raise HTTPException(status_code=404, detail="Source metadata could not be loaded for mapping.")
+
+        mapping_config = normalize_pipeline_mapping_config(payload.mapping_config)
+        target_columns = get_pipeline_mapping_columns(mapping_config)
+        if not target_columns and payload.target_schema and payload.target_object and object_exists(db_conn, payload.target_schema, payload.target_object):
+            target_columns = [
+                {
+                    "source_column": "",
+                    "target_column": column.get("column_name") or "",
+                    "data_type": column.get("data_type") or "text",
+                    "is_nullable": column.get("is_nullable") or "YES",
+                }
+                for column in get_object_columns(db_conn, payload.target_schema, payload.target_object)
+            ]
+
+        if not target_columns:
+            raise HTTPException(status_code=400, detail="Create or load target columns on the canvas before asking AI to map them.")
+
+        suggestions = suggest_mapping_columns_with_llm(source_columns, target_columns)
+        suggestion_by_target = {
+            normalize_sql_identifier(item.get("target_column") or "").lower(): item
+            for item in suggestions
+            if item.get("target_column")
+        }
+
+        mapped_columns: List[Dict[str, Any]] = []
+        for target_column in target_columns:
+            target_name = normalize_sql_identifier(target_column.get("target_column") or "")
+            suggestion = suggestion_by_target.get(target_name.lower(), {})
+            mapped_columns.append({
+                "source_column": suggestion.get("source_column") or target_column.get("source_column") or "",
+                "target_column": target_name,
+                "data_type": str(target_column.get("data_type") or "text"),
+                "is_nullable": target_column.get("is_nullable") == "YES" if isinstance(target_column.get("is_nullable"), str) else bool(target_column.get("is_nullable", True)),
+                "include": bool(target_column.get("include", True)),
+                "reason": suggestion.get("reason") or "",
+                "confidence": suggestion.get("confidence") or 0,
+            })
+
+        return {
+            "mapping_columns": mapped_columns,
+            "used_llm": bool(OPENAI_API_KEY and client is not None),
+        }
+    finally:
+        try:
+            db_conn.close()
+        except Exception:
+            pass
+
+
+def build_agentic_target_resolution(
+    connection,
+    user_requirement: str,
+    source_schema: str,
+    source_object: str,
+    pipeline_target_object: str,
+    available_schemas: List[str],
+    pipeline_mapping: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    requested_schema, requested_object = extract_agentic_target_reference(user_requirement)
+    layer_hint = extract_agentic_layer_hint(user_requirement)
+    pipeline_target_schema, pipeline_target_name = parse_pipeline_target_reference(
+        pipeline_target_object,
+        source_schema,
+    )
+    mapping_target_schema, mapping_target_object = get_pipeline_mapping_target_reference(
+        pipeline_mapping or {},
+        source_schema,
+    )
+
+    resolved_schema = resolve_schema_hint(
+        requested_schema or layer_hint or mapping_target_schema or pipeline_target_schema,
+        available_schemas,
+    )
+    resolved_object = requested_object or mapping_target_object or pipeline_target_name
+
+    if not resolved_object and resolved_schema and _is_specific_relation_name(source_object):
+        resolved_object = normalize_sql_identifier(source_object)
+
+    target_schema_exists = bool(
+        resolved_schema and any(schema.lower() == resolved_schema.lower() for schema in available_schemas)
+    )
+    target_exists = False
+    if resolved_schema and resolved_object and target_schema_exists:
+        target_exists = object_exists(connection, resolved_schema, resolved_object)
+
+    target_label = f"{resolved_schema}.{resolved_object}" if resolved_schema and resolved_object else ""
+    create_requested = bool(re.search(r"\b(create|build|make|generate)\b", user_requirement or "", re.IGNORECASE))
+    confirmation_required = bool(resolved_schema and resolved_object and not target_exists)
+
+    confirmation_parts: List[str] = []
+    if confirmation_required:
+        if not target_schema_exists:
+            confirmation_parts.append(f'Schema "{resolved_schema}" does not exist')
+        confirmation_parts.append(f'Target table "{target_label}" does not exist')
+
+    confirmation_message = ""
+    if confirmation_required:
+        confirmation_message = (
+            f'{". ".join(confirmation_parts)}. '
+            "Do you want Agentic AI to generate the required CREATE SCHEMA / CREATE TABLE steps for this target? "
+            "DDL execution will still need separate approval when you run the pipeline."
+        )
+
+    return {
+        "requested_layer": layer_hint,
+        "target_schema": resolved_schema,
+        "target_object": resolved_object,
+        "target_label": target_label,
+        "target_schema_exists": target_schema_exists,
+        "target_exists": target_exists,
+        "create_requested": create_requested,
+        "confirmation_required": confirmation_required,
+        "confirmation_message": confirmation_message,
+    }
+
+
+def align_planned_target_table(raw_target_table: str, target_resolution: Dict[str, Any]) -> str:
+    expected_schema = target_resolution.get("target_schema") or ""
+    expected_object = target_resolution.get("target_object") or ""
+    if not expected_schema or not expected_object or not raw_target_table:
+        return raw_target_table
+
+    parsed_target = split_relation_name(raw_target_table, expected_schema)
+    if not parsed_target:
+        return raw_target_table
+
+    target_schema, target_object = parsed_target
+    if target_object.lower() != expected_object.lower():
+        return raw_target_table
+    if target_schema.lower() == expected_schema.lower():
+        return raw_target_table
+
+    return f"{expected_schema}.{expected_object}"
+
+
+def validate_pipeline_target_alignment(sql: str, expected_target_table: str, default_schema: str) -> List[str]:
+    if not sql or not expected_target_table:
+        return []
+
+    expected_relation = split_relation_name(expected_target_table, default_schema)
+    if not expected_relation:
+        return []
+
+    target_relations = parse_target_relations_from_sql(sql, expected_relation[0])
+    if not target_relations:
+        return []
+
+    if any(
+        same_relation(
+            relation["schema_name"],
+            relation["object_name"],
+            expected_relation[0],
+            expected_relation[1],
+        )
+        for relation in target_relations
+    ):
+        return []
+
+    rendered_targets = ", ".join(
+        f"{relation['schema_name']}.{relation['object_name']}"
+        for relation in target_relations
+    )
+    return [
+        (
+            f"Generated SQL targets {rendered_targets}, but the requested target is "
+            f"{expected_relation[0]}.{expected_relation[1]}. Do not rewrite the target schema or table."
+        )
     ]
 
 
@@ -903,6 +1412,80 @@ def parse_object_reference(reference: str, default_schema: str) -> tuple[str, st
     return default_schema, parts[0]
 
 
+def normalize_object_references(references: Any, default_schema: str) -> List[str]:
+    if isinstance(references, str):
+        raw_values = [references]
+    elif isinstance(references, list):
+        raw_values = [str(item).strip() for item in references if str(item).strip()]
+    else:
+        raw_values = []
+
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        schema_name, object_name = parse_object_reference(value, default_schema)
+        if not object_name:
+            continue
+        qualified_name = f"{schema_name}.{object_name}"
+        lowered = qualified_name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(qualified_name)
+
+    return normalized
+
+
+def extract_recent_history_context(
+    conversation_history: List[Dict[str, Any]],
+    default_schema: str,
+) -> Dict[str, Any]:
+    for turn in reversed(conversation_history or []):
+        if not isinstance(turn, dict):
+            continue
+
+        raw_context = turn.get("context") if isinstance(turn.get("context"), dict) else {}
+        schema_name = str(
+            turn.get("schema_name")
+            or raw_context.get("schema")
+            or ""
+        ).strip()
+        object_name = str(
+            turn.get("object_name")
+            or raw_context.get("object")
+            or ""
+        ).strip()
+        database_name = str(
+            turn.get("database_name")
+            or raw_context.get("database")
+            or ""
+        ).strip()
+        selected_objects = normalize_object_references(
+            turn.get("selected_objects") or raw_context.get("selected_objects"),
+            schema_name or default_schema,
+        )
+
+        if not object_name and selected_objects:
+            selected_schema, selected_object = parse_object_reference(selected_objects[0], schema_name or default_schema)
+            schema_name = schema_name or selected_schema
+            object_name = selected_object
+
+        if schema_name or object_name or database_name or selected_objects:
+            return {
+                "database_name": database_name or None,
+                "schema_name": schema_name or default_schema,
+                "object_name": object_name or None,
+                "selected_objects": selected_objects,
+            }
+
+    return {
+        "database_name": None,
+        "schema_name": default_schema,
+        "object_name": None,
+        "selected_objects": [],
+    }
+
+
 def match_prompt_objects(prompt_text: str, all_objects: List[Dict[str, str]]) -> List[Dict[str, str]]:
     prompt_lower = (prompt_text or "").lower().strip()
     if not prompt_lower:
@@ -1029,6 +1612,103 @@ def build_out_of_scope_insights_reply() -> str:
     )
 
 
+def format_insights_answer_value(value: Any) -> str:
+    if value is None:
+        return "null"
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if isinstance(value, int):
+        return f"{value:,}"
+
+    if isinstance(value, float):
+        if value.is_integer():
+            return f"{int(value):,}"
+        return f"{value:,.2f}"
+
+    return str(value)
+
+
+def build_query_answer_summary(columns: List[str], rows: List[List[Any]]) -> Dict[str, Any]:
+    if not columns or not rows:
+        return {
+            "headline": "",
+            "highlights": [],
+        }
+
+    if len(rows) == 1:
+        first_row = rows[0]
+        row_pairs = [
+            (columns[idx], first_row[idx])
+            for idx in range(min(len(columns), len(first_row)))
+        ]
+
+        if len(row_pairs) == 1:
+            column_name, value = row_pairs[0]
+            return {
+                "headline": f"{column_name}: {format_insights_answer_value(value)}",
+                "highlights": [],
+            }
+
+        compact_pairs = row_pairs[:4]
+        return {
+            "headline": " | ".join(
+                f"{column_name}: {format_insights_answer_value(value)}"
+                for column_name, value in compact_pairs
+            ),
+            "highlights": [],
+        }
+
+    numeric_indexes: List[int] = []
+    for idx in range(len(columns)):
+        has_numeric = False
+        for row in rows:
+            if idx >= len(row):
+                continue
+            try:
+                float(row[idx])
+                has_numeric = True
+                break
+            except Exception:
+                continue
+        if has_numeric:
+            numeric_indexes.append(idx)
+
+    metric_index = numeric_indexes[0] if numeric_indexes else -1
+    dimension_index = -1
+    for idx in range(len(columns)):
+        if idx not in numeric_indexes:
+            dimension_index = idx
+            break
+
+    if metric_index >= 0 and dimension_index >= 0:
+        metric_name = columns[metric_index]
+        dimension_name = columns[dimension_index]
+        highlights = []
+        for row in rows[:5]:
+            if metric_index >= len(row) or dimension_index >= len(row):
+                continue
+            label = format_insights_answer_value(row[dimension_index])
+            value = format_insights_answer_value(row[metric_index])
+            highlights.append(f"{label}: {value}")
+
+        return {
+            "headline": f"Found {len(rows)} {dimension_name} values with {metric_name} results.",
+            "highlights": highlights,
+        }
+
+    preview_pairs = []
+    first_row = rows[0]
+    for idx in range(min(len(columns), len(first_row), 4)):
+        preview_pairs.append(f"{columns[idx]}: {format_insights_answer_value(first_row[idx])}")
+
+    return {
+        "headline": f"Returned {len(rows)} rows.",
+        "highlights": preview_pairs,
+    }
+
+
 def summarize_query_result(columns: List[str], rows: List[List[Any]]) -> Dict[str, Any]:
     if not columns or not rows:
         return {
@@ -1141,21 +1821,32 @@ def build_agentic_response_text(
     query_result: Optional[Dict[str, Any]],
     insights: Dict[str, Any],
 ) -> str:
-    lines: List[str] = [
-        f'I analyzed your request "{user_prompt}" on {schema_name}.{object_name}.'
-    ]
+    query_rows = (query_result or {}).get("rows") or []
+    query_columns = (query_result or {}).get("columns") or []
+    answer_summary = build_query_answer_summary(query_columns, query_rows)
+
+    lines: List[str] = []
+
+    if answer_summary.get("headline"):
+        lines.append(answer_summary["headline"])
+    else:
+        lines.append(f'I analyzed your request "{user_prompt}" on {schema_name}.{object_name}.')
+
+    answer_highlights = answer_summary.get("highlights") or []
+    if answer_highlights:
+        lines.append("Highlights: " + "; ".join(answer_highlights))
 
     explanation = (generation_result or {}).get("explanation")
-    if explanation:
+    if explanation and not answer_summary.get("headline"):
         lines.append(str(explanation))
 
     stats = (insights or {}).get("stats")
-    if stats:
+    if stats and not answer_summary.get("headline"):
         lines.append(
             f"{stats['metric']} avg={stats['avg']:.2f}, min={stats['min']:.2f}, max={stats['max']:.2f}."
         )
 
-    if query_result and isinstance(query_result.get("rows"), list):
+    if query_result and isinstance(query_result.get("rows"), list) and not answer_summary.get("headline"):
         lines.append(f"Returned {len(query_result['rows'])} rows in preview.")
 
     recommendations = (insights or {}).get("recommendations") or []
@@ -1372,7 +2063,7 @@ def parse_target_relations_from_sql(sql: str, default_schema: str):
             re.IGNORECASE,
         ),
         re.compile(
-            r'\bcreate\s+(?:or\s+replace\s+)?table\s+((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*)){0,2})',
+            r'\bcreate\s+(?:or\s+replace\s+)?table\s+(?:if\s+not\s+exists\s+)?((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*)){0,2})',
             re.IGNORECASE,
         ),
         re.compile(
@@ -1402,6 +2093,341 @@ def parse_target_relations_from_sql(sql: str, default_schema: str):
             })
 
     return targets
+
+
+def split_sql_statements(sql: str) -> List[str]:
+    text = sql or ""
+    if not text.strip():
+        return []
+
+    statements: List[str] = []
+    current: List[str] = []
+    in_single_quote = False
+    in_double_quote = False
+    in_line_comment = False
+    block_comment_depth = 0
+    dollar_quote_tag: Optional[str] = None
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+
+        if in_line_comment:
+            current.append(char)
+            if char == "\n":
+                in_line_comment = False
+            index += 1
+            continue
+
+        if block_comment_depth > 0:
+            current.append(char)
+            if char == "/" and next_char == "*":
+                current.append(next_char)
+                block_comment_depth += 1
+                index += 2
+                continue
+            if char == "*" and next_char == "/":
+                current.append(next_char)
+                block_comment_depth -= 1
+                index += 2
+                continue
+            index += 1
+            continue
+
+        if dollar_quote_tag:
+            if text.startswith(dollar_quote_tag, index):
+                current.append(dollar_quote_tag)
+                index += len(dollar_quote_tag)
+                dollar_quote_tag = None
+                continue
+            current.append(char)
+            index += 1
+            continue
+
+        if in_single_quote:
+            current.append(char)
+            if char == "'":
+                if next_char == "'":
+                    current.append(next_char)
+                    index += 2
+                    continue
+                in_single_quote = False
+            index += 1
+            continue
+
+        if in_double_quote:
+            current.append(char)
+            if char == '"':
+                if next_char == '"':
+                    current.append(next_char)
+                    index += 2
+                    continue
+                in_double_quote = False
+            index += 1
+            continue
+
+        if char == "-" and next_char == "-":
+            current.append(char)
+            current.append(next_char)
+            in_line_comment = True
+            index += 2
+            continue
+
+        if char == "/" and next_char == "*":
+            current.append(char)
+            current.append(next_char)
+            block_comment_depth = 1
+            index += 2
+            continue
+
+        if char == "'":
+            current.append(char)
+            in_single_quote = True
+            index += 1
+            continue
+
+        if char == '"':
+            current.append(char)
+            in_double_quote = True
+            index += 1
+            continue
+
+        if char == "$":
+            dollar_match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", text[index:])
+            if dollar_match:
+                dollar_quote_tag = dollar_match.group(0)
+                current.append(dollar_quote_tag)
+                index += len(dollar_quote_tag)
+                continue
+
+        if char == ";":
+            statement = "".join(current).strip()
+            if statement:
+                statements.append(statement.rstrip(";").strip())
+            current = []
+            index += 1
+            continue
+
+        current.append(char)
+        index += 1
+
+    trailing_statement = "".join(current).strip()
+    if trailing_statement:
+        statements.append(trailing_statement.rstrip(";").strip())
+
+    return statements
+
+
+def get_sql_statement_leading_verb(sql: str) -> str:
+    text = (sql or "").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"^\s*(?:--[^\n]*(?:\n|$)\s*|/\*.*?\*/\s*)*", "", text, flags=re.DOTALL)
+    if not text:
+        return ""
+
+    return (text.split(None, 1)[0] or "").lower()
+
+
+def split_top_level_csv(text: str) -> List[str]:
+    parts: List[str] = []
+    current: List[str] = []
+    depth = 0
+    in_single_quote = False
+    in_double_quote = False
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+
+        if in_single_quote:
+            current.append(char)
+            if char == "'":
+                if next_char == "'":
+                    current.append(next_char)
+                    index += 2
+                    continue
+                in_single_quote = False
+            index += 1
+            continue
+
+        if in_double_quote:
+            current.append(char)
+            if char == '"':
+                if next_char == '"':
+                    current.append(next_char)
+                    index += 2
+                    continue
+                in_double_quote = False
+            index += 1
+            continue
+
+        if char == "'":
+            current.append(char)
+            in_single_quote = True
+            index += 1
+            continue
+
+        if char == '"':
+            current.append(char)
+            in_double_quote = True
+            index += 1
+            continue
+
+        if char == "(":
+            depth += 1
+            current.append(char)
+            index += 1
+            continue
+
+        if char == ")":
+            depth = max(depth - 1, 0)
+            current.append(char)
+            index += 1
+            continue
+
+        if char == "," and depth == 0:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            index += 1
+            continue
+
+        current.append(char)
+        index += 1
+
+    trailing = "".join(current).strip()
+    if trailing:
+        parts.append(trailing)
+
+    return parts
+
+
+def normalize_sql_type_name(data_type: str) -> str:
+    return re.sub(r"\s+", " ", (data_type or "").strip().lower())
+
+
+def is_text_like_sql_type(data_type: str) -> bool:
+    normalized = normalize_sql_type_name(data_type)
+    return any(token in normalized for token in ["character varying", "varchar", "text", "citext"])
+
+
+def is_unsafe_single_character_type(data_type: str) -> bool:
+    normalized = normalize_sql_type_name(data_type)
+    return normalized in {"character", "char", "character(1)", "char(1)"}
+
+
+def extract_create_table_column_types(sql: str, default_schema: str) -> List[Dict[str, Any]]:
+    extracted: List[Dict[str, Any]] = []
+    create_table_pattern = re.compile(
+        r'\bcreate\s+(?:or\s+replace\s+)?table\s+(?:if\s+not\s+exists\s+)?(?P<relation>(?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\.(?:"[^"]+"|[a-zA-Z_][\w$]*)){0,2})\s*\((?P<body>.*)\)\s*$',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    for statement in split_sql_statements(sql):
+        match = create_table_pattern.search(statement.strip())
+        if not match:
+            continue
+
+        relation = split_relation_name(match.group("relation"), default_schema)
+        if not relation:
+            continue
+
+        schema_name, object_name = relation
+        body = match.group("body") or ""
+        for part in split_top_level_csv(body):
+            stripped_part = part.strip()
+            if not stripped_part:
+                continue
+            if re.match(r'^(constraint|primary\s+key|foreign\s+key|unique|check)\b', stripped_part, re.IGNORECASE):
+                continue
+
+            column_match = re.match(r'^(?P<column>"[^"]+"|[a-zA-Z_][\w$]*)\s+(?P<remainder>.+)$', stripped_part, re.IGNORECASE | re.DOTALL)
+            if not column_match:
+                continue
+
+            column_name = unquote_sql_identifier(column_match.group("column"))
+            remainder = column_match.group("remainder").strip()
+            constraint_match = re.search(
+                r'\s+(constraint\b|not\s+null\b|null\b|default\b|primary\b|references\b|check\b|unique\b|collate\b|generated\b)',
+                remainder,
+                re.IGNORECASE,
+            )
+            data_type = remainder[:constraint_match.start()].strip() if constraint_match else remainder
+            if not data_type:
+                continue
+
+            extracted.append({
+                "schema_name": schema_name,
+                "object_name": object_name,
+                "column_name": column_name,
+                "data_type": data_type,
+            })
+
+    return extracted
+
+
+def validate_generated_target_column_types(
+    sql: str,
+    default_schema: str,
+    target_resolution: Dict[str, Any],
+    mapping_columns: List[Dict[str, Any]],
+    source_columns: List[Dict[str, Any]],
+) -> List[str]:
+    create_columns = extract_create_table_column_types(sql, default_schema)
+    if not create_columns:
+        return []
+
+    expected_target_schema = target_resolution.get("target_schema") or ""
+    expected_target_object = target_resolution.get("target_object") or ""
+    mapping_by_target = {
+        normalize_sql_identifier(column.get("target_column") or "").lower(): column
+        for column in mapping_columns
+        if column.get("target_column")
+    }
+    source_by_name = {
+        normalize_sql_identifier(column.get("column_name") or "").lower(): column
+        for column in source_columns
+        if column.get("column_name")
+    }
+
+    errors: List[str] = []
+    for created_column in create_columns:
+        if expected_target_schema and expected_target_object:
+            if not same_relation(
+                created_column["schema_name"],
+                created_column["object_name"],
+                expected_target_schema,
+                expected_target_object,
+            ):
+                continue
+
+        target_column_name = normalize_sql_identifier(created_column.get("column_name") or "").lower()
+        actual_type = created_column.get("data_type") or ""
+        mapped_column = mapping_by_target.get(target_column_name)
+        expected_type = str(mapped_column.get("data_type") or "") if mapped_column else ""
+
+        source_type = ""
+        if mapped_column and mapped_column.get("source_column"):
+            source_match = source_by_name.get(normalize_sql_identifier(mapped_column.get("source_column") or "").lower())
+            if source_match:
+                source_type = str(source_match.get("data_type") or "")
+        elif target_column_name in source_by_name:
+            source_type = str(source_by_name[target_column_name].get("data_type") or "")
+
+        if is_unsafe_single_character_type(actual_type) and (
+            is_text_like_sql_type(expected_type) or is_text_like_sql_type(source_type)
+        ):
+            preferred_type = expected_type or source_type or "text"
+            errors.append(
+                f"Target column '{created_column['column_name']}' uses unsafe type '{actual_type}'. Use a text-compatible type such as '{preferred_type}' instead of fixed-length character(1)."
+            )
+
+    return list(dict.fromkeys(errors))
 
 
 def same_relation(a_schema: str, a_object: str, b_schema: str, b_object: str) -> bool:
@@ -1473,6 +2499,94 @@ def validate_generated_sql_against_metadata(
         "errors": list(dict.fromkeys(errors)),
         "validated_objects": list(dict.fromkeys(validated_objects)),
     }
+
+
+def validate_sql_relations_against_allowlist(
+    sql: str,
+    default_schema: str,
+    allowed_relations: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    relations, _ = extract_sql_source_relations(sql, default_schema)
+    allowed_keys = {
+        ((item.get("schema") or "").lower(), (item.get("name") or "").lower())
+        for item in (allowed_relations or [])
+        if item.get("schema") and item.get("name")
+    }
+
+    errors: List[str] = []
+    validated_objects: List[str] = []
+
+    for relation in relations:
+        rel_key = (
+            (relation.get("schema_name") or "").lower(),
+            (relation.get("object_name") or "").lower(),
+        )
+        qualified_name = f"{relation.get('schema_name')}.{relation.get('object_name')}"
+        validated_objects.append(qualified_name)
+        if rel_key not in allowed_keys:
+            errors.append(
+                f"Generated SQL referenced '{qualified_name}', which is outside the agentic retrieval context."
+            )
+
+    return {
+        "valid": not errors,
+        "errors": list(dict.fromkeys(errors)),
+        "validated_objects": list(dict.fromkeys(validated_objects)),
+    }
+
+
+_FULL_REFRESH_REQUIREMENT_RE = re.compile(
+    r"\b(full\s*refresh|replace(?:\s+all)?|overwrite|truncate|rebuild(?:\s+from\s+scratch)?|reload(?:\s+from\s+scratch)?|drop\s+and\s+recreate)\b",
+    re.IGNORECASE,
+)
+_TRANSIENT_STAGE_RE = re.compile(
+    r"\b(stage|staging|temp|temporary|scratch|work)\b",
+    re.IGNORECASE,
+)
+
+
+def requirement_allows_destructive_pipeline_sql(user_requirement: str) -> bool:
+    return bool(_FULL_REFRESH_REQUIREMENT_RE.search(user_requirement or ""))
+
+
+def is_transient_pipeline_target(step_name: str, sql_intent: str, target_table: str) -> bool:
+    combined = " ".join([
+        step_name or "",
+        sql_intent or "",
+        target_table or "",
+    ])
+    return bool(_TRANSIENT_STAGE_RE.search(combined))
+
+
+def validate_pipeline_sql_destructive_ops(
+    sql: str,
+    user_requirement: str,
+    step_name: str,
+    sql_intent: str,
+    target_table: str,
+) -> List[str]:
+    if not sql:
+        return []
+
+    if requirement_allows_destructive_pipeline_sql(user_requirement):
+        return []
+
+    if is_transient_pipeline_target(step_name, sql_intent, target_table):
+        return []
+
+    errors: List[str] = []
+
+    if re.search(r"\btruncate\s+table\b", sql, re.IGNORECASE):
+        errors.append(
+            "Destructive SQL detected: TRUNCATE TABLE is not allowed unless the requirement explicitly asks for a full refresh or the target is transient staging owned by this pipeline."
+        )
+
+    if re.search(r"\bdrop\s+table\b", sql, re.IGNORECASE):
+        errors.append(
+            "Destructive SQL detected: DROP TABLE is not allowed unless the requirement explicitly asks for replacement or the target is transient staging owned by this pipeline."
+        )
+
+    return errors
 
 
 # =========================
@@ -1639,7 +2753,7 @@ def list_saved_connections(_u=_any_authenticated):
     """Return all saved connections (shared team resource). Passwords are masked."""
     conn = get_app_store_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM connections WHERE is_active = 1 ORDER BY id")
+    cur.execute("SELECT * FROM connections WHERE is_active = TRUE ORDER BY id")
     rows = cur.fetchall()
     conn.close()
     results = []
@@ -1664,11 +2778,24 @@ def save_connection(payload: ConnectionRequest, current_user=Depends(require_rol
     conn = get_app_store_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT OR REPLACE INTO connections (
+        INSERT INTO connections (
             id, name, db_type, host, port, database_name, schema_name,
             username, password, account, warehouse, role, is_active
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET
+            name = EXCLUDED.name,
+            db_type = EXCLUDED.db_type,
+            host = EXCLUDED.host,
+            port = EXCLUDED.port,
+            database_name = EXCLUDED.database_name,
+            schema_name = EXCLUDED.schema_name,
+            username = EXCLUDED.username,
+            password = EXCLUDED.password,
+            account = EXCLUDED.account,
+            warehouse = EXCLUDED.warehouse,
+            role = EXCLUDED.role,
+            is_active = EXCLUDED.is_active
     """, (
         connection_id,
         payload.name,
@@ -1676,13 +2803,13 @@ def save_connection(payload: ConnectionRequest, current_user=Depends(require_rol
         payload.host,
         payload.port,
         payload.database_name or "postgres",
-        payload.schema_name or "public",
+        payload.schema_name or "src",
         payload.username,
         payload.password or "",
         payload.account or "",
         payload.warehouse or "",
         payload.role or "",
-        1,
+        True,
     ))
     conn.commit()
     conn.close()
@@ -1695,7 +2822,7 @@ def save_connection(payload: ConnectionRequest, current_user=Depends(require_rol
         "host": payload.host,
         "port": payload.port,
         "database_name": payload.database_name or "postgres",
-        "schema_name": payload.schema_name or "public",
+        "schema_name": payload.schema_name or "src",
         "username": payload.username,
         "account": payload.account,
         "warehouse": payload.warehouse,
@@ -2155,11 +3282,11 @@ def get_lineage(
                 JOIN pipelines p
                   ON p.id = ps.pipeline_id
                 WHERE LOWER(COALESCE(p.database_name, '')) = LOWER(?)
-                  AND COALESCE(ps.is_active, 1) = 1
+                                    AND COALESCE(ps.is_active, TRUE) = TRUE
                 ORDER BY ps.pipeline_id, ps.step_order, ps.id
             """, (database_name,))
             step_rows = app_store_cur.fetchall()
-        except sqlite3.OperationalError:
+        except AppStoreOperationalError:
             pipeline_rows = []
             step_rows = []
         finally:
@@ -2181,12 +3308,12 @@ def get_lineage(
 
         # Header-based fallback
         for row in pipeline_rows:
-            pipeline_id = row[0]
-            pipeline_name = row[1] or f"Pipeline {pipeline_id}"
-            pipeline_schema = (row[2] or "").strip()
-            source_object = (row[3] or "").strip()
-            target_object = (row[4] or "").strip()
-            has_successful_run = int(row[5] or 0) == 1
+            pipeline_id = row.get("id")
+            pipeline_name = row.get("name") or f"Pipeline {pipeline_id}"
+            pipeline_schema = (row.get("schema_name") or "").strip()
+            source_object = (row.get("source_object") or "").strip()
+            target_object = (row.get("target_object") or "").strip()
+            has_successful_run = int(row.get("has_successful_run") or 0) == 1
 
             relation_kind = (
                 f"PIPELINE_RUN:{pipeline_name}"
@@ -2225,10 +3352,10 @@ def get_lineage(
 
         # Step-SQL-based lineage (important fix)
         for row in step_rows:
-            pipeline_id = row[0]
-            step_name = row[1] or ""
-            sql_text = row[2] or ""
-            pipeline_name = row[3] or f"Pipeline {pipeline_id}"
+            pipeline_id = row.get("pipeline_id")
+            step_name = row.get("step_name") or ""
+            sql_text = row.get("sql_text") or ""
+            pipeline_name = row.get("name") or f"Pipeline {pipeline_id}"
 
             relation_kind = f"PIPELINE_STEP:{pipeline_name}:{step_name}"
 
@@ -2432,7 +3559,7 @@ def get_ai_transformation_suggestions(payload: TransformationSuggestionRequest, 
 def fix_sql(request: FixSqlRequest, _u=_dev_or_admin):
     conn = None
     try:
-        default_schema = (request.schema_name or "public").strip() or "public"
+        default_schema = (request.schema_name or "src").strip() or "src"
         conn = get_db_connection_by_id(request.connection_id, request.database_name)
         agent_log: List[Dict[str, Any]] = []
 
@@ -2879,7 +4006,7 @@ def insights_agentic_rag(payload: InsightsAgenticRAGRequest, _u=_dev_or_admin):
     if not prompt_text:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
-    active_connection = saved_connections.get(payload.connection_id) or {}
+    active_connection = get_saved_connection(payload.connection_id) or {}
     effective_database = (
         (payload.database_name or "").strip()
         or (active_connection.get("database_name") or "").strip()
@@ -2888,7 +4015,7 @@ def insights_agentic_rag(payload: InsightsAgenticRAGRequest, _u=_dev_or_admin):
     default_schema = (
         (payload.schema_name or "").strip()
         or (active_connection.get("schema_name") or "").strip()
-        or "public"
+        or "src"
     )
     conn = get_db_connection_by_id(payload.connection_id, effective_database)
     try:
@@ -2905,23 +4032,43 @@ def insights_agentic_rag(payload: InsightsAgenticRAGRequest, _u=_dev_or_admin):
         }
 
         prompt_matches = match_prompt_objects(prompt_text, all_db_objects)
+        recent_history_context = extract_recent_history_context(
+            payload.conversation_history or [],
+            default_schema,
+        )
+        history_selected_objects = recent_history_context.get("selected_objects") or []
+        history_schema_name = str(recent_history_context.get("schema_name") or default_schema).strip() or default_schema
+        history_object_name = str(recent_history_context.get("object_name") or "").strip()
 
         has_explicit_context = bool((payload.object_name or "").strip()) or bool(payload.selected_objects)
-        if not has_explicit_context and not is_data_analytics_prompt(prompt_text, prompt_matches):
+        has_history_context = bool(history_object_name or history_selected_objects)
+        if not has_explicit_context and not has_history_context and not is_data_analytics_prompt(prompt_text, prompt_matches):
             return {
                 "mode": "out_of_scope",
                 "assistant_response": build_out_of_scope_insights_reply(),
             }
 
+        request_schema_name = ((payload.schema_name or "").strip() or default_schema)
+
         selected_from_request: List[Dict[str, str]] = []
-        for ref in payload.selected_objects:
-            schema_name, object_name = parse_object_reference(ref, default_schema)
+        if payload.selected_objects:
+            requested_selected_objects = payload.selected_objects
+        elif (payload.object_name or "").strip():
+            # Explicit disambiguation selection is authoritative; do not mix in stale history tables.
+            requested_selected_objects = []
+        else:
+            requested_selected_objects = history_selected_objects
+        for ref in requested_selected_objects:
+            schema_name, object_name = parse_object_reference(ref, request_schema_name)
             key = (schema_name.lower(), object_name.lower())
             if key in object_lookup:
                 selected_from_request.append(object_lookup[key])
 
-        resolved_schema = default_schema
+        resolved_schema = request_schema_name or history_schema_name or default_schema
         resolved_object = (payload.object_name or "").strip()
+
+        if not resolved_object and not prompt_matches and history_object_name:
+            resolved_object = history_object_name
 
         if not resolved_object and selected_from_request:
             resolved_schema = selected_from_request[0]["schema"]
@@ -2964,7 +4111,7 @@ def insights_agentic_rag(payload: InsightsAgenticRAGRequest, _u=_dev_or_admin):
                     for item in ranked_all[:12]
                 ]
             else:
-                public_like = {"public", "information_schema", "pg_catalog"}
+                public_like = {"src", "public", "information_schema", "pg_catalog"}
                 sorted_objects = sorted(
                     all_db_objects,
                     key=lambda item: (
@@ -2996,7 +4143,7 @@ def insights_agentic_rag(payload: InsightsAgenticRAGRequest, _u=_dev_or_admin):
             raise HTTPException(status_code=404, detail="Target object not found")
 
         selected_context_objects = selected_from_request.copy()
-        if not selected_context_objects and prompt_matches:
+        if not selected_context_objects and not has_explicit_context and prompt_matches:
             selected_context_objects = prompt_matches[:4]
 
         # Build retrieval context from metadata + relationships (RAG context payload).
@@ -3060,11 +4207,29 @@ def insights_agentic_rag(payload: InsightsAgenticRAGRequest, _u=_dev_or_admin):
             "history": history_lines,
         }
 
+        allowed_agentic_relations = [
+            {"schema": resolved_schema, "name": resolved_object, "type": resolved_type},
+            *[
+                {"schema": obj["schema"], "name": obj["name"], "type": obj.get("type", "TABLE")}
+                for obj in selected_context_objects[:8]
+            ],
+        ]
+
+        unique_allowed_agentic_relations: List[Dict[str, str]] = []
+        seen_allowed_agentic_keys: set[tuple[str, str]] = set()
+        for relation in allowed_agentic_relations:
+            key = (relation["schema"].lower(), relation["name"].lower())
+            if key in seen_allowed_agentic_keys:
+                continue
+            seen_allowed_agentic_keys.add(key)
+            unique_allowed_agentic_relations.append(relation)
+
         augmented_prompt = "\n\n".join(
             [
                 f"Business question: {prompt_text}",
                 "Use this retrieved metadata context to answer accurately:",
                 json.dumps(retrieval_context_payload),
+                "Use only the resolved base object and retrieved related objects from this agentic context. Do not invent substitute schemas, staging tables, or core-layer targets unless they are explicitly present in the retrieved metadata context.",
                 "Generate SQL that directly supports business insights and keep it preview-safe where possible.",
             ]
         )
@@ -3080,9 +4245,69 @@ def insights_agentic_rag(payload: InsightsAgenticRAGRequest, _u=_dev_or_admin):
 
         generation_result = ai_generate_sql(sql_payload, _u)
         sql_text = (generation_result.get("sql") or "").strip().rstrip(";")
+        warnings: List[str] = list(generation_result.get("warnings") or [])
+
+        relation_guard = validate_sql_relations_against_allowlist(
+            sql_text,
+            resolved_schema,
+            unique_allowed_agentic_relations,
+        ) if sql_text else {"valid": True, "errors": [], "validated_objects": []}
+
+        if not relation_guard["valid"]:
+            relation_hint_lines = "\n".join(
+                f'  - "{item["schema"]}"."{item["name"]}" ({item.get("type", "TABLE")})'
+                for item in unique_allowed_agentic_relations
+            ) or "  - None"
+
+            heal_system_prompt = f"""You are a senior PostgreSQL analytics assistant operating inside an agentic Insights workflow.
+
+You must rewrite the SQL so it stays strictly within the allowed agentic context.
+
+=== ALLOWED RELATIONS ===
+{relation_hint_lines}
+=== END ALLOWED RELATIONS ===
+
+Rules:
+- Use ONLY the relations listed above.
+- Do NOT invent substitute schemas, renamed staging tables, or core/history targets.
+- Keep the SQL preview-safe and PostgreSQL compatible.
+- Return STRICT JSON only with this shape:
+{{
+  "sql": "corrected SQL",
+  "explanation": "brief explanation",
+  "assumptions": ["assumption1"],
+  "warnings": ["warning1"]
+}}
+"""
+
+            heal_user_prompt = json.dumps({
+                "business_question": prompt_text,
+                "retrieval_context": retrieval_context_payload,
+                "previous_sql": sql_text,
+                "validation_errors": relation_guard["errors"],
+            }, indent=2)
+
+            heal_result = call_llm_json(heal_system_prompt, heal_user_prompt)
+            heal_content = heal_result.get("content") if heal_result else None
+            healed_sql = (heal_content.get("sql") or "").strip().rstrip(";") if heal_content else ""
+            healed_relation_guard = validate_sql_relations_against_allowlist(
+                healed_sql,
+                resolved_schema,
+                unique_allowed_agentic_relations,
+            ) if healed_sql else {"valid": False, "errors": ["Agentic retry did not return SQL."], "validated_objects": []}
+
+            if healed_sql and healed_relation_guard["valid"]:
+                sql_text = healed_sql
+                if heal_content:
+                    generation_result["explanation"] = heal_content.get("explanation") or generation_result.get("explanation")
+                    generation_result["assumptions"] = list(heal_content.get("assumptions") or generation_result.get("assumptions") or [])
+                    warnings = list(heal_content.get("warnings") or [])
+                warnings.append("SQL was auto-corrected to stay within the agentic retrieval context.")
+            else:
+                warnings.extend(relation_guard["errors"])
+                warnings.append("Generated SQL drifted outside the agentic retrieval context and could not be fully corrected.")
 
         query_result = None
-        warnings: List[str] = list(generation_result.get("warnings") or [])
 
         if sql_text and is_previewable_sql(sql_text):
             try:
@@ -3110,6 +4335,10 @@ def insights_agentic_rag(payload: InsightsAgenticRAGRequest, _u=_dev_or_admin):
                 warnings.append(f"Failed to execute preview SQL: {str(e)}")
 
         insights = summarize_query_result(
+            (query_result or {}).get("columns") or [],
+            (query_result or {}).get("rows") or [],
+        )
+        answer_summary = build_query_answer_summary(
             (query_result or {}).get("columns") or [],
             (query_result or {}).get("rows") or [],
         )
@@ -3147,6 +4376,7 @@ def insights_agentic_rag(payload: InsightsAgenticRAGRequest, _u=_dev_or_admin):
             "sql": sql_text,
             "query_result": query_result,
             "insights": insights,
+            "answer_summary": answer_summary,
             "retrieval_context": retrieval_context_payload,
         }
 
@@ -3504,7 +4734,6 @@ Rules:
             returned_statement_type,
             sql
         )
-
         return {
             "title": llm_content.get("title", "Generated SQL"),
             "sql": sql,
@@ -3718,6 +4947,7 @@ ORDER BY duplicate_count DESC;
 class AgenticPipelineStepsRequest(BaseModel):
     user_requirement: str
     selected_tables: Optional[List[str]] = []
+    allow_create_target: bool = False
 
 
 @app.post("/api/pipelines/{pipeline_id}/ai-generate-steps")
@@ -3753,11 +4983,12 @@ def ai_generate_pipeline_steps(
 
     pipeline = dict(pipeline_row)
     connection_id = pipeline.get("connection_id")
-    schema_name = (pipeline.get("schema_name") or "public").strip()
+    schema_name = (pipeline.get("schema_name") or "src").strip()
     database_name = (pipeline.get("database_name") or "").strip() or None
     source_object = (pipeline.get("source_object") or "").strip()
     target_object = (pipeline.get("target_object") or "").strip()
     pipeline_name = pipeline.get("name", "")
+    pipeline_mapping = normalize_pipeline_mapping_config(pipeline.get("mapping_config"))
 
     # ── Connect to target database ────────────────────────────────────────
     db_conn = get_db_connection_by_id(connection_id, database_name)
@@ -3768,6 +4999,23 @@ def ai_generate_pipeline_steps(
         schema_objects = get_schema_objects(db_conn, schema_name)
         known_schema_objects = {obj["name"].lower(): obj["type"] for obj in schema_objects}
         all_db_objects = get_all_schema_objects(db_conn)
+        available_schemas = get_user_schema_names(db_conn)
+        target_resolution = build_agentic_target_resolution(
+            db_conn,
+            payload.user_requirement,
+            schema_name,
+            source_object,
+            target_object,
+            available_schemas,
+            pipeline_mapping,
+        )
+        mapping_columns = get_pipeline_mapping_columns(pipeline_mapping)
+        source_columns = get_object_columns(db_conn, schema_name, source_object) if source_object else []
+        mapping_block = build_pipeline_mapping_block(
+            mapping_columns,
+            target_resolution.get("target_schema") or "",
+            target_resolution.get("target_object") or "",
+        )
 
         def _col_block(schema: str, name: str, columns: list) -> str:
             lines = [f'Table: "{schema}"."{name}"']
@@ -3810,11 +5058,37 @@ def ai_generate_pipeline_steps(
                     preloaded_blocks.append(blk)
                     preloaded_names.add(tbl_lower)
 
-        base_metadata_text = "\n\n".join(preloaded_blocks) if preloaded_blocks else "(no pre-loaded metadata — tables will be resolved per step)"
+        base_metadata_sections = list(preloaded_blocks)
+        if mapping_block:
+            base_metadata_sections.append(mapping_block)
+        base_metadata_text = (
+            "\n\n".join(base_metadata_sections)
+            if base_metadata_sections
+            else "(no pre-loaded metadata — tables will be resolved per step)"
+        )
+        mapping_summary_text = mapping_block or "(no saved source-to-target mapping has been defined for this pipeline)"
 
         available_objects_summary = "\n".join(
             f'  "{schema_name}"."{o["name"]}" ({o["type"]})'
             for o in schema_objects[:120]
+        )
+        available_schemas_summary = "\n".join(
+            f'  "{schema}"'
+            for schema in available_schemas[:80]
+        ) or "(no user schemas found)"
+        target_schema_name = target_resolution.get("target_schema") or ""
+        target_schema_objects = [
+            obj
+            for obj in all_db_objects
+            if target_schema_name and obj["schema"].lower() == target_schema_name.lower()
+        ]
+        target_schema_objects_summary = "\n".join(
+            f'  "{obj["schema"]}"."{obj["name"]}" ({obj["type"]})'
+            for obj in target_schema_objects[:80]
+        ) or (
+            f'(schema "{target_schema_name}" currently has no tables or views)'
+            if target_schema_name
+            else "(no explicit target schema resolved from the request)"
         )
 
         agent_log.append({
@@ -3822,6 +5096,34 @@ def ai_generate_pipeline_steps(
             "status": "ok",
             "details": f"Pre-loaded {len(preloaded_blocks)} table(s). Schema has {len(schema_objects)} object(s).",
         })
+        agent_log.append({
+            "phase": "TARGET_RESOLUTION",
+            "status": "ok",
+            "details": (
+                f"Resolved target={target_resolution.get('target_label') or 'not explicit'}, "
+                f"schema_exists={target_resolution.get('target_schema_exists')}, "
+                f"target_exists={target_resolution.get('target_exists')}"
+            ),
+        })
+
+        if target_resolution.get("confirmation_required") and not payload.allow_create_target:
+            agent_log.append({
+                "phase": "TARGET_CONFIRMATION",
+                "status": "partial",
+                "details": target_resolution.get("confirmation_message") or "Target creation approval required.",
+            })
+            return {
+                "plan_summary": "",
+                "steps": [],
+                "agent_log": agent_log,
+                "llm_enabled": True,
+                "total_steps": 0,
+                "validated_steps": 0,
+                "confirmation_required": True,
+                "confirmation_message": target_resolution.get("confirmation_message", ""),
+                "confirmation_context": target_resolution,
+                "target_resolution": target_resolution,
+            }
 
         # ── PHASE 1: PLAN ─────────────────────────────────────────────────
         plan_system = f"""You are an expert PostgreSQL data pipeline architect.
@@ -3830,9 +5132,21 @@ def ai_generate_pipeline_steps(
 {base_metadata_text}
 === END METADATA ===
 
+=== AVAILABLE USER SCHEMAS ===
+{available_schemas_summary}
+=== END SCHEMAS ===
+
 === ALL OBJECTS IN SCHEMA "{schema_name}" ===
 {available_objects_summary}
 === END OBJECTS ===
+
+=== OBJECTS IN RESOLVED TARGET SCHEMA ===
+{target_schema_objects_summary}
+=== END TARGET SCHEMA OBJECTS ===
+
+=== SAVED SOURCE TO TARGET MAPPING ===
+{mapping_summary_text}
+=== END SAVED MAPPING ===
 
 Your task: Read the user's pipeline requirements and produce an ordered execution plan of SQL steps.
 Each step must be one atomic SQL operation (CREATE TABLE, INSERT INTO, UPDATE, MERGE, DROP, TRUNCATE, etc.).
@@ -3854,10 +5168,17 @@ Return STRICT JSON only — no markdown, no extra text:
 }}
 
 Rules:
-- Only reference tables that EXIST in the metadata or object list above.
+- Only reference source tables that EXIST in the metadata or object lists above.
+- If a resolved target schema/object is provided in the request context, use that exact target. Do not silently replace it with the current source schema or a similarly named existing object.
+- If allow_create_target=true and the resolved target does not exist yet, it is valid to plan CREATE SCHEMA IF NOT EXISTS and CREATE TABLE IF NOT EXISTS for that resolved target even though it is not in the existing object list.
+- If a saved source-to-target mapping is provided, treat it as the preferred target design. Reuse the mapped target column names and data types when planning CREATE TABLE and load steps for a new target.
+- Never rewrite a requested layer such as core, staging, history, or mart to a different schema unless the resolved target schema explicitly matches.
 - Order steps so dependencies are created before they are used.
-- Typical ETL pattern: (1) drop/truncate staging, (2) create/populate staging, (3) transform, (4) merge/upsert final, (5) cleanup.
+- Prefer non-destructive patterns by default: CREATE IF NOT EXISTS, INSERT incremental rows, UPDATE existing rows, or MERGE/UPSERT current-state targets.
+- Only use DROP or TRUNCATE when the user's requirement explicitly asks for full replacement/rebuild, or when clearing a transient staging table created and owned by this pipeline.
+- Typical ETL pattern: (1) prepare transient staging only if needed, (2) load/transform, (3) merge/upsert final target, (4) optional cleanup of transient staging.
 - Maximum 8 steps. Be precise — one SQL statement per step.
+- One SQL statement per step means exactly one top-level executable statement. Never combine CREATE + INSERT, CREATE + UPDATE, or multiple DDL/DML statements into the same step.
 - Use fully-qualified names: "schema"."table"."""
 
         plan_user = json.dumps({
@@ -3868,6 +5189,11 @@ Rules:
             "database": database_name or "default",
             "user_requirement": payload.user_requirement,
             "selected_tables": payload.selected_tables or [],
+            "resolved_target_schema": target_resolution.get("target_schema") or "not resolved",
+            "resolved_target_object": target_resolution.get("target_object") or "not resolved",
+            "resolved_target_exists": target_resolution.get("target_exists"),
+            "allow_create_target": payload.allow_create_target,
+            "mapping_config": pipeline_mapping,
         }, indent=2)
 
         plan_res = call_llm_json(plan_system, plan_user)
@@ -3880,6 +5206,27 @@ Rules:
             )
 
         planned_steps = plan_content["steps"]
+        if target_resolution.get("target_schema") and target_resolution.get("target_object"):
+            adjusted_steps: List[Dict[str, Any]] = []
+            adjusted_count = 0
+            for step_plan in planned_steps:
+                adjusted_step = dict(step_plan)
+                raw_target_table = adjusted_step.get("target_table", "")
+                aligned_target_table = align_planned_target_table(raw_target_table, target_resolution)
+                if aligned_target_table != raw_target_table:
+                    adjusted_step["target_table"] = aligned_target_table
+                    adjusted_count += 1
+                adjusted_steps.append(adjusted_step)
+            planned_steps = adjusted_steps
+            if adjusted_count:
+                agent_log.append({
+                    "phase": "PLAN",
+                    "status": "ok",
+                    "details": (
+                        f"Aligned {adjusted_count} planned step target(s) to "
+                        f"{target_resolution.get('target_label')} based on deterministic target resolution."
+                    ),
+                })
         plan_summary = plan_content.get("plan_summary", "")
         agent_log.append({
             "phase": "PLAN",
@@ -3931,7 +5278,10 @@ Rules:
             if target_table_raw:
                 _resolve_table(target_table_raw)
 
-            step_metadata_text = "\n\n".join(step_blocks) if step_blocks else base_metadata_text
+            step_metadata_sections = list(step_blocks)
+            if mapping_block and mapping_block not in step_metadata_sections:
+                step_metadata_sections.append(mapping_block)
+            step_metadata_text = "\n\n".join(step_metadata_sections) if step_metadata_sections else base_metadata_text
 
             gen_system = f"""You are a senior PostgreSQL data engineer. Generate production-quality SQL for a single pipeline step.
 
@@ -3939,17 +5289,27 @@ Rules:
 {step_metadata_text}
 === END METADATA ===
 
+=== SAVED SOURCE TO TARGET MAPPING ===
+{mapping_summary_text}
+=== END SAVED MAPPING ===
+
 ABSOLUTE RULES (violation = broken pipeline):
 1. Use ONLY column names that are explicitly listed in the metadata above. Not a single invented column.
 2. Use schema-qualified table names everywhere: "schema_name"."table_name"
 3. Every SQL statement must be complete and executable with zero edits — no placeholders, no comments like --TODO
 4. Match PostgreSQL data types exactly. Use explicit CAST() when combining columns of different types.
-5. For CREATE TABLE steps: include DROP TABLE IF EXISTS before the CREATE.
-6. For INSERT INTO steps: the column list must exactly match the target table's columns from metadata.
+5. For CREATE TABLE steps: use CREATE TABLE IF NOT EXISTS by default. Only include DROP TABLE IF EXISTS when the requirement explicitly asks to replace the table or the table is transient staging owned by this pipeline.
+6. For INSERT INTO steps: the column list must exactly match the target table's columns from metadata. If the target is a newly approved table that is created from a source table in an earlier step, derive the insert column list from the source metadata in the same order.
 7. For MERGE/UPSERT: both WHEN MATCHED and WHEN NOT MATCHED must use only real column names.
-8. Apply COALESCE for NULL-able columns, TRIM() for text/varchar columns in transformations.
-9. For deduplication: ROW_NUMBER() OVER (PARTITION BY <pk_cols> ORDER BY <updated_at_col> DESC).
-10. The SQL must work the first time it runs — assume a fresh database with the schema from metadata.
+8. Destructive SQL such as TRUNCATE TABLE or DROP TABLE is not allowed unless the requirement explicitly asks for full refresh/replacement or the table is transient staging owned by this pipeline.
+9. Prefer UPDATE + INSERT or MERGE/UPSERT over truncate-and-reload for current-state targets.
+10. Apply COALESCE for NULL-able columns, TRIM() for text/varchar columns in transformations.
+11. For deduplication: ROW_NUMBER() OVER (PARTITION BY <pk_cols> ORDER BY <updated_at_col> DESC).
+12. The SQL must work the first time it runs — assume a fresh database with the schema from metadata.
+13. If a resolved target schema/object is provided in the user context, you MUST write to that exact target and must not switch to another schema.
+14. If a saved target mapping is provided for a new target, CREATE TABLE columns must match that mapped target definition instead of inventing a different structure.
+15. Return exactly one top-level executable SQL statement for this step. Never combine CREATE TABLE with INSERT, or any other multiple-statement sequence, in one step.
+16. Do not use bare CHARACTER or CHAR(1) for text-like target columns unless the metadata explicitly requires a single fixed character. Prefer CHARACTER VARYING, VARCHAR, or TEXT based on the mapping/source metadata.
 
 Return STRICT JSON only — no markdown:
 {{
@@ -3970,6 +5330,11 @@ Return STRICT JSON only — no markdown:
                 "pipeline_target_object": f"{schema_name}.{target_object}" if target_object else "",
                 "schema": schema_name,
                 "user_requirement": payload.user_requirement,
+                "resolved_target_schema": target_resolution.get("target_schema") or "",
+                "resolved_target_object": target_resolution.get("target_object") or "",
+                "allow_create_target": payload.allow_create_target,
+                "target_exists": target_resolution.get("target_exists"),
+                "mapping_config": pipeline_mapping,
             }, indent=2)
 
             gen_res = call_llm_json(gen_system, gen_user)
@@ -4001,6 +5366,43 @@ Return STRICT JSON only — no markdown:
             validation = validate_generated_sql_against_metadata(
                 db_conn, schema_name, sql, known_schema_objects
             )
+            destructive_errors = validate_pipeline_sql_destructive_ops(
+                sql,
+                payload.user_requirement,
+                step_name,
+                sql_intent,
+                target_table_raw,
+            )
+            target_alignment_errors = validate_pipeline_target_alignment(
+                sql,
+                target_table_raw,
+                schema_name,
+            )
+            target_type_errors = validate_generated_target_column_types(
+                sql,
+                schema_name,
+                target_resolution,
+                mapping_columns,
+                source_columns,
+            )
+            if destructive_errors:
+                validation = {
+                    "valid": False,
+                    "errors": validation["errors"] + destructive_errors,
+                    "validated_objects": validation.get("validated_objects", []),
+                }
+            if target_alignment_errors:
+                validation = {
+                    "valid": False,
+                    "errors": validation["errors"] + target_alignment_errors,
+                    "validated_objects": validation.get("validated_objects", []),
+                }
+            if target_type_errors:
+                validation = {
+                    "valid": False,
+                    "errors": validation["errors"] + target_type_errors,
+                    "validated_objects": validation.get("validated_objects", []),
+                }
             heal_attempts = 0
 
             while not validation["valid"] and heal_attempts < 2:
@@ -4011,9 +5413,9 @@ Return STRICT JSON only — no markdown:
                     "previous_sql": sql,
                     "validation_errors": validation["errors"],
                     "instruction": (
-                        f"Your SQL had these metadata errors: {retry_errors}. "
-                        "Fix them. You MUST use only the EXACT column names listed in the "
-                        "EXACT TABLE METADATA in the system prompt. Return corrected JSON."
+                        f"Your SQL had these validation errors: {retry_errors}. "
+                        "Fix them. If the errors mention destructive SQL, replace TRUNCATE/DROP with a non-destructive create, update, insert, or merge pattern unless the requirement explicitly asks for a full refresh. "
+                        "You MUST use only the EXACT column names listed in the EXACT TABLE METADATA in the system prompt. Return corrected JSON."
                     ),
                     "step_name": step_name,
                     "sql_intent": sql_intent,
@@ -4029,6 +5431,43 @@ Return STRICT JSON only — no markdown:
                     validation = validate_generated_sql_against_metadata(
                         db_conn, schema_name, sql, known_schema_objects
                     )
+                    destructive_errors = validate_pipeline_sql_destructive_ops(
+                        sql,
+                        payload.user_requirement,
+                        step_name,
+                        sql_intent,
+                        target_table_raw,
+                    )
+                    target_alignment_errors = validate_pipeline_target_alignment(
+                        sql,
+                        target_table_raw,
+                        schema_name,
+                    )
+                    target_type_errors = validate_generated_target_column_types(
+                        sql,
+                        schema_name,
+                        target_resolution,
+                        mapping_columns,
+                        source_columns,
+                    )
+                    if destructive_errors:
+                        validation = {
+                            "valid": False,
+                            "errors": validation["errors"] + destructive_errors,
+                            "validated_objects": validation.get("validated_objects", []),
+                        }
+                    if target_alignment_errors:
+                        validation = {
+                            "valid": False,
+                            "errors": validation["errors"] + target_alignment_errors,
+                            "validated_objects": validation.get("validated_objects", []),
+                        }
+                    if target_type_errors:
+                        validation = {
+                            "valid": False,
+                            "errors": validation["errors"] + target_type_errors,
+                            "validated_objects": validation.get("validated_objects", []),
+                        }
                     if validation["valid"]:
                         assumptions.append(f"Auto-healed after {heal_attempts} correction attempt(s).")
                 else:
@@ -4052,15 +5491,83 @@ Return STRICT JSON only — no markdown:
                 ),
             })
 
-            generated_steps.append({
-                "step_name": step_name,
-                "step_type": "sql",
-                "sql_text": sql,
-                "explanation": gen_content.get("explanation", description),
-                "validated": validation["valid"],
-                "warnings": warnings,
-                "assumptions": assumptions,
-            })
+            statement_chunks = split_sql_statements(sql)
+            if not statement_chunks:
+                statement_chunks = [sql.strip().rstrip(";")]
+
+            if len(statement_chunks) > 1:
+                assumptions = list(assumptions) + [
+                    f"Split AI output into {len(statement_chunks)} separate executable steps because the model returned multiple SQL statements in one step."
+                ]
+
+            for statement_index, statement_sql in enumerate(statement_chunks, start=1):
+                statement_sql = statement_sql.strip().rstrip(";")
+                if not statement_sql:
+                    continue
+
+                statement_validation = validate_generated_sql_against_metadata(
+                    db_conn, schema_name, statement_sql, known_schema_objects
+                )
+                statement_destructive_errors = validate_pipeline_sql_destructive_ops(
+                    statement_sql,
+                    payload.user_requirement,
+                    step_name,
+                    sql_intent,
+                    target_table_raw,
+                )
+                statement_target_alignment_errors = validate_pipeline_target_alignment(
+                    statement_sql,
+                    target_table_raw,
+                    schema_name,
+                )
+                statement_target_type_errors = validate_generated_target_column_types(
+                    statement_sql,
+                    schema_name,
+                    target_resolution,
+                    mapping_columns,
+                    source_columns,
+                )
+
+                if statement_destructive_errors:
+                    statement_validation = {
+                        "valid": False,
+                        "errors": statement_validation["errors"] + statement_destructive_errors,
+                        "validated_objects": statement_validation.get("validated_objects", []),
+                    }
+                if statement_target_alignment_errors:
+                    statement_validation = {
+                        "valid": False,
+                        "errors": statement_validation["errors"] + statement_target_alignment_errors,
+                        "validated_objects": statement_validation.get("validated_objects", []),
+                    }
+                if statement_target_type_errors:
+                    statement_validation = {
+                        "valid": False,
+                        "errors": statement_validation["errors"] + statement_target_type_errors,
+                        "validated_objects": statement_validation.get("validated_objects", []),
+                    }
+
+                statement_verb = get_sql_statement_leading_verb(statement_sql).upper() or f"SQL {statement_index}"
+                statement_name = step_name
+                if len(statement_chunks) > 1:
+                    statement_name = f"{step_name} [{statement_index}/{len(statement_chunks)} {statement_verb}]"
+
+                statement_warnings = list(warnings)
+                if not statement_validation["valid"]:
+                    statement_warnings.extend(statement_validation["errors"])
+                    statement_warnings.append(
+                        "Could not fully validate all table references after splitting the generated SQL. Review before running."
+                    )
+
+                generated_steps.append({
+                    "step_name": statement_name,
+                    "step_type": "sql",
+                    "sql_text": statement_sql,
+                    "explanation": gen_content.get("explanation", description),
+                    "validated": statement_validation["valid"],
+                    "warnings": list(dict.fromkeys(statement_warnings)),
+                    "assumptions": assumptions,
+                })
 
         return {
             "plan_summary": plan_summary,
@@ -4069,6 +5576,8 @@ Return STRICT JSON only — no markdown:
             "llm_enabled": True,
             "total_steps": len(generated_steps),
             "validated_steps": sum(1 for s in generated_steps if s.get("validated")),
+            "confirmation_required": False,
+            "target_resolution": target_resolution,
         }
 
     except HTTPException:

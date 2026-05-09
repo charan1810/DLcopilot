@@ -30,6 +30,9 @@ export default function SchemaExplorerPage() {
         explorerCache,
         setExplorerCache,
         resetSelections,
+        updateLineageTabSelection,
+        setLineageActiveTab,
+        setActivePage,
     } = useAppContext();
 
     const [loading, setLoading] = useState(false);
@@ -40,6 +43,14 @@ export default function SchemaExplorerPage() {
     const objectDetails = explorerCache.objectDetails || null;
     const sampleData = explorerCache.sampleData || [];
     const autoQuery = explorerCache.autoQuery || "";
+    const schemaPipelineAnchorObject =
+        selectedObject ||
+        objects.find((item) => String(item?.type || "").toLowerCase().includes("table"))?.name ||
+        objects[0]?.name ||
+        "";
+    const canLaunchSchemaPipeline =
+        !!connectionId && !!selectedDatabase && !!selectedSchema && !!schemaPipelineAnchorObject;
+
     const setCache = (patch) => {
         setExplorerCache((prev) => ({ ...prev, ...patch }));
     };
@@ -231,15 +242,59 @@ export default function SchemaExplorerPage() {
         }
     };
 
+    const handleStartSchemaPipeline = () => {
+        if (!canLaunchSchemaPipeline) {
+            return;
+        }
+
+        const nextSelection = {
+            selectedDatabase,
+            selectedSchema,
+            selectedObject: schemaPipelineAnchorObject,
+        };
+
+        updateLineageTabSelection("pipeline-builder", nextSelection);
+        setLineageActiveTab("pipeline-builder", nextSelection);
+        setActivePage("lineage");
+    };
+
     return (
         <div className="page">
             <div className="module-hero compact-hero">
-                <div className="module-badge">Engineering Flow</div>
-                <h1 className="module-title">Explorer</h1>
-                <p className="module-subtitle">
-                    Connect to a database server, browse schemas and objects, inspect metadata,
-                    and pass the same context into ETL / Lineage and Insights.
-                </p>
+                <div className="explorer-hero-layout">
+                    <div>
+                        <div className="module-badge">Engineering Flow</div>
+                        <h1 className="module-title">Explorer</h1>
+                        <p className="module-subtitle">
+                            Connect to a database server, browse schemas and objects, inspect metadata,
+                            and pass the same context into ETL / Lineage and Insights.
+                        </p>
+                    </div>
+
+                    <div className="explorer-hero-action-card">
+                        <div className="explorer-hero-action-label">Schema Pipeline Starter</div>
+                        <div className="explorer-hero-action-title">
+                            Open Pipeline Builder with this schema context
+                        </div>
+                        <div className="explorer-hero-action-copy">
+                            Generate a multi-table pipeline draft for the selected schema, including
+                            next-layer, history, or SCD-style starter patterns.
+                        </div>
+                        <div className="explorer-hero-action-meta">
+                            {selectedDatabase || "Select a database"}
+                            {selectedSchema ? ` / ${selectedSchema}` : " / select a schema"}
+                            {schemaPipelineAnchorObject ? ` / anchor: ${schemaPipelineAnchorObject}` : ""}
+                        </div>
+                        <button
+                            type="button"
+                            className="primary-btn explorer-start-pipeline-btn"
+                            onClick={handleStartSchemaPipeline}
+                            disabled={!canLaunchSchemaPipeline}
+                        >
+                            Start Pipeline In Builder
+                        </button>
+                    </div>
+                </div>
             </div>
 
             <ConnectionForm onConnectionSaved={handleConnectionSaved} />
@@ -263,7 +318,7 @@ export default function SchemaExplorerPage() {
                     />
                 </div>
 
-                <div className="explorer-card fixed-top-card explorer-objects-col">
+                <div className="explorer-card fixed-top-card">
                     <ObjectList
                         objects={objects}
                         selectedObject={selectedObject}

@@ -136,7 +136,7 @@ export default function QueryRunner() {
                 query,
                 error,
                 {
-                    schema: selectedSchema || "public",
+                    schema: selectedSchema || "src",
                     object_name: selectedObject || "",
                 }
             );
