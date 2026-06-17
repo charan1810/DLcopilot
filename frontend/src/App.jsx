@@ -7,6 +7,8 @@ import SignupPage from "./pages/SignupPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import EnvComparatorPage from "./pages/EnvComparatorPage";
 import OptimizerPage from "./pages/OptimizerPage";
+import ModelDevelopmentPage from "./pages/ModelDevelopmentPage";
+import OrchestrationPage from "./pages/OrchestrationPage";
 import TopHeader from "./components/TopHeader";
 import SidebarNav from "./components/SidebarNav";
 import AppErrorBoundary from "./components/AppErrorBoundary";
@@ -47,12 +49,31 @@ function PlaceholderPage({ title, subtitle }) {
 }
 
 export default function App() {
-    const { activePage, setActivePage, clearAllCachedState } = useAppContext();
-    const { isAuthenticated, loading: authLoading, user } = useAuth();
+    const { activePage, setActivePage, clearAllCachedState, setConnectionId, setConnectionPayload } = useAppContext();
+    const { isAuthenticated, loading: authLoading, user, activeConnection } = useAuth();
     const [authView, setAuthView] = useState("login"); // "login" | "signup"
     const [theme, setTheme] = useState("light");
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const previousAuthenticatedRef = useRef(false);
+
+    // Auto-activate the connection assigned by admin when user logs in
+    useEffect(() => {
+        if (activeConnection) {
+            setConnectionId(activeConnection.id);
+            setConnectionPayload({
+                name: activeConnection.name || "",
+                db_type: activeConnection.db_type || "postgres",
+                host: activeConnection.host || "",
+                port: activeConnection.port || "",
+                database_name: activeConnection.database_name || "",
+                schema_name: activeConnection.schema_name || "",
+                username: activeConnection.username || "",
+                account: activeConnection.account || "",
+                warehouse: activeConnection.warehouse || "",
+                role: activeConnection.role || "",
+            });
+        }
+    }, [activeConnection, setConnectionId, setConnectionPayload]);
 
     useEffect(() => {
         if (isAuthenticated && !previousAuthenticatedRef.current) {
@@ -78,6 +99,14 @@ export default function App() {
             },
             lineage: {
                 title: "ETL / Lineage",
+                section: "Engineering",
+            },
+            orchestration: {
+                title: "Workflow Studio",
+                section: "Engineering",
+            },
+            modeldev: {
+                title: "Entity Development",
                 section: "Engineering",
             },
             insights: {
@@ -137,6 +166,10 @@ export default function App() {
                 return <SchemaExplorerPage />;
             case "lineage":
                 return <LineagePage />;
+            case "orchestration":
+                return <OrchestrationPage />;
+            case "modeldev":
+                return <ModelDevelopmentPage />;
             case "insights":
                 return <InsightsPage />;
             case "comparator":

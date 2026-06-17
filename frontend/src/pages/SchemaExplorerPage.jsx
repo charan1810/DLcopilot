@@ -33,6 +33,7 @@ export default function SchemaExplorerPage() {
     } = useAppContext();
 
     const [loading, setLoading] = useState(false);
+    const [connectionError, setConnectionError] = useState("");
 
     const databases = explorerCache.databases || [];
     const schemas = explorerCache.schemas || [];
@@ -113,14 +114,29 @@ export default function SchemaExplorerPage() {
         try {
             return await fetchDatabases(idToUse);
         } catch (err) {
-            if ((err.message || "").includes("Connection not found")) {
-                const payload = {
-                    ...connectionPayload,
-                    password: sessionPassword || "",
-                };
-                const saved = await saveConnection(payload);
-                setConnectionId(saved.id);
-                return fetchDatabases(saved.id);
+            const errorMsg = err.message || "";
+            // Handle password-related errors
+            if (
+                errorMsg.includes("Connection not found") ||
+                errorMsg.includes("no password supplied") ||
+                errorMsg.includes("authentication failed") ||
+                errorMsg.includes("FATAL")
+            ) {
+                // Try to re-save with current session password and retry
+                if (connectionPayload && sessionPassword) {
+                    try {
+                        const payload = {
+                            ...connectionPayload,
+                            password: sessionPassword || "",
+                        };
+                        const saved = await saveConnection(payload);
+                        setConnectionId(saved.id);
+                        return await fetchDatabases(saved.id);
+                    } catch (saveErr) {
+                        // If save fails, throw the original error for user to handle
+                        throw err;
+                    }
+                }
             }
             throw err;
         }
@@ -128,6 +144,7 @@ export default function SchemaExplorerPage() {
 
     const handleConnectionSaved = async (id) => {
         setConnectionId(id);
+        setConnectionError("");
         resetSelections();
 
         setCache({
@@ -143,6 +160,10 @@ export default function SchemaExplorerPage() {
         try {
             const res = await fetchDatabases(id);
             setCache({ databases: res.databases || [] });
+        } catch (err) {
+            const errorMsg = err.message || "Failed to connect to database";
+            console.error("Failed to load databases:", err);
+            setConnectionError(errorMsg);
         } finally {
             setLoading(false);
         }
@@ -156,9 +177,25 @@ export default function SchemaExplorerPage() {
             if (!activeId) return;
 
             setLoading(true);
+            setConnectionError("");
             try {
                 const res = await safeFetchDatabases(activeId);
                 setCache({ databases: res.databases || [] });
+            } catch (err) {
+                // Log error and display to user
+                const errorMsg = err.message || "Failed to connect to database";
+                if (
+                    errorMsg.includes("no password supplied") ||
+                    errorMsg.includes("authentication failed") ||
+                    errorMsg.includes("FATAL")
+                ) {
+                    // Assigned connections may require a session password on first use.
+                    setConnectionError("");
+                    return;
+                }
+                console.error("Failed to hydrate explorer:", err);
+                setConnectionError(errorMsg);
+                // Clear loading state so UI can show the connection form
             } finally {
                 setLoading(false);
             }
@@ -245,6 +282,13 @@ export default function SchemaExplorerPage() {
             <ConnectionForm onConnectionSaved={handleConnectionSaved} />
 
             {loading && <div className="loading-banner">Loading...</div>}
+            {connectionError && (
+                <div className="form-error" style={{ margin: "20px" }}>
+                    <strong>Connection Error:</strong> {connectionError}
+                    <br />
+                    <small>Please check your connection settings and try again.</small>
+                </div>
+            )}
 
             <div className="explorer-top-grid">
                 <div className="explorer-card fixed-top-card">

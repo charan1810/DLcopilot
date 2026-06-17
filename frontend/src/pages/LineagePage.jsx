@@ -45,8 +45,11 @@ function LineageList({ title, items, emptyText, onNavigate }) {
                                 </div>
                             </div>
 
-                            <div className="lineage-relation-chip">
-                                {item.relation_kind || "related"}
+                            <div
+                                className="lineage-relation-chip"
+                                title={item.relation_kind || "related"}
+                            >
+                                {formatGraphRelationLabel(item.relation_kind)}
                             </div>
                         </button>
                     ))}
@@ -111,6 +114,94 @@ function truncateLabel(value, maxLength = 34) {
     return `${text.slice(0, maxLength - 1)}...`;
 }
 
+// Infers the ETL layer tier for a table (src=1, staging=2, core=3, mart=4).
+// Strong schema names (core, src) take priority; for src-schema tables, object
+// name hints like "_staging" promote the tier to the staging layer.
+function inferAbsoluteTier(schemaName, objectName) {
+    const schema = (schemaName || "").toLowerCase();
+    const obj = (objectName || "").toLowerCase();
+
+    if (schema.includes("mart") || schema.includes("gold") || schema.includes("reporting") || schema.includes("analytics")) return 4;
+    if (schema === "core" || schema.startsWith("core_") || schema.includes("warehouse") || schema === "wh" || schema === "dw") return 3;
+    if (schema.includes("staging") || schema.includes("stg") || schema.includes("intermediate")) return 2;
+
+    if (schema === "src" || schema.startsWith("src_") || schema.includes("source") || schema.includes("raw") || schema.includes("landing")) {
+        // staging tables inside a src schema still belong to the staging layer
+        if (obj.includes("_staging") || obj.endsWith("_stg") || obj.includes("staging_")) return 2;
+        return 1;
+    }
+
+    // unknown schema — use object name hints
+    if (obj.includes("_staging") || obj.endsWith("_stg")) return 2;
+    return 2;
+}
+
+function relationKindText(relationKind) {
+    return String(relationKind || "").toUpperCase();
+}
+
+function isReferenceRelation(relationKind) {
+    return relationKindText(relationKind).startsWith("FK");
+}
+
+function isFlowRelation(relationKind) {
+    const kind = relationKindText(relationKind);
+    return kind.startsWith("PIPELINE_") || kind.startsWith("VIEW_");
+}
+
+function splitLineageByKind(lineage) {
+    const upstreamAll = Array.isArray(lineage?.upstream)
+        ? lineage.upstream.filter(Boolean)
+        : [];
+    const downstreamAll = Array.isArray(lineage?.downstream)
+        ? lineage.downstream.filter(Boolean)
+        : [];
+
+    const hasFlow = [...upstreamAll, ...downstreamAll].some((item) =>
+        isFlowRelation(item?.relation_kind)
+    );
+
+    const primaryUpstream = hasFlow
+        ? upstreamAll.filter((item) => isFlowRelation(item?.relation_kind))
+        : upstreamAll;
+
+    const primaryDownstream = hasFlow
+        ? downstreamAll.filter((item) => isFlowRelation(item?.relation_kind))
+        : downstreamAll;
+
+    const referenceUpstream = upstreamAll.filter((item) =>
+        isReferenceRelation(item?.relation_kind)
+    );
+    const referenceDownstream = downstreamAll.filter((item) =>
+        isReferenceRelation(item?.relation_kind)
+    );
+
+    return {
+        hasFlow,
+        upstreamAll,
+        downstreamAll,
+        primaryUpstream,
+        primaryDownstream,
+        referenceUpstream,
+        referenceDownstream,
+    };
+}
+
+function formatGraphRelationLabel(relationKind) {
+    const kind = relationKindText(relationKind);
+
+    if (!kind) return "related";
+    if (kind.startsWith("PIPELINE_STEP")) return "pipeline step";
+    if (kind.startsWith("PIPELINE_RUN")) return "pipeline run";
+    if (kind.startsWith("PIPELINE_DEFINED")) return "pipeline";
+    if (kind.startsWith("VIEW_SOURCE")) return "view source";
+    if (kind.startsWith("VIEW_TARGET")) return "view target";
+    if (kind.startsWith("FK_TARGET")) return "fk target";
+    if (kind.startsWith("FK:")) return "fk";
+
+    return truncateLabel(relationKind || "related", 20);
+}
+
 function buildLineageGraphLayout(nodes, edges, rootKey) {
     if (!nodes.length) {
         return {
@@ -166,6 +257,11 @@ function buildLineageGraphLayout(nodes, edges, rootKey) {
             return { ...node, depth: 0 };
         }
 
+        // Use tier-based depth when pre-assigned (direct lineage graph path)
+        if (Number.isFinite(node.tierDepth)) {
+            return { ...node, depth: node.tierDepth };
+        }
+
         const upstreamDist = upstreamDistances.get(node.key);
         const downstreamDist = downstreamDistances.get(node.key);
 
@@ -191,9 +287,9 @@ function buildLineageGraphLayout(nodes, edges, rootKey) {
     });
 
     const depthColumns = Array.from(byDepth.keys()).sort((a, b) => a - b);
-    const NODE_WIDTH = 228;
-    const NODE_HEIGHT = 66;
-    const COLUMN_GAP = 84;
+    const NODE_WIDTH = 248;
+    const NODE_HEIGHT = 76;
+    const COLUMN_GAP = 96;
     const ROW_GAP = 24;
     const PADDING_X = 28;
     const PADDING_Y = 32;
@@ -453,8 +549,8 @@ function LineageGraph({ graphData, graphLoading, graphError, onNavigate }) {
                             const midX = Math.round((sourceX + targetX) / 2);
                             const midY = Math.round((sourceY + targetY) / 2);
 
-                            const labelText = truncateLabel(edge.relationKind || "related", 14);
-                            const labelW = Math.min(labelText.length * 6.5 + 12, 110);
+                            const labelText = truncateLabel(formatGraphRelationLabel(edge.relationKind), 16);
+                            const labelW = Math.min(labelText.length * 7 + 14, 130);
                             return (
                                 <g key={edge.id} className="lineage-graph-edge-group">
                                     <path
@@ -499,10 +595,13 @@ function LineageGraph({ graphData, graphLoading, graphError, onNavigate }) {
                                     ry="14"
                                 />
                                 <g clipPath={`url(#nc-${idx})`}>
-                                    <text className="lineage-graph-node-title" x="12" y="24">
-                                        {`${node.schemaName}.${node.objectName}`}
+                                    <text className="lineage-graph-node-schema" x="12" y="20">
+                                        {truncateLabel(node.schemaName, 30)}
                                     </text>
-                                    <text className="lineage-graph-node-subtitle" x="12" y="42">
+                                    <text className="lineage-graph-node-title" x="12" y="40">
+                                        {truncateLabel(node.objectName, 30)}
+                                    </text>
+                                    <text className="lineage-graph-node-subtitle" x="12" y="58">
                                         {node.objectType || "OBJECT"}
                                     </text>
                                 </g>
@@ -516,11 +615,21 @@ function LineageGraph({ graphData, graphLoading, graphError, onNavigate }) {
 }
 
 function LineageTab({ lineage, graphData, graphLoading, graphError, onNavigate }) {
+    const {
+        hasFlow,
+        primaryUpstream,
+        primaryDownstream,
+        referenceUpstream,
+        referenceDownstream,
+    } = useMemo(() => splitLineageByKind(lineage), [lineage]);
+
+    const referenceCount = referenceUpstream.length + referenceDownstream.length;
+
     const flowText = useMemo(() => {
-        const upstreamNames = (lineage.upstream || []).map(
+        const upstreamNames = (primaryUpstream || []).map(
             (item) => `${item.schema_name}.${item.object_name}`
         );
-        const downstreamNames = (lineage.downstream || []).map(
+        const downstreamNames = (primaryDownstream || []).map(
             (item) => `${item.schema_name}.${item.object_name}`
         );
 
@@ -529,7 +638,7 @@ function LineageTab({ lineage, graphData, graphLoading, graphError, onNavigate }
             current: `${lineage.schema_name}.${lineage.object_name}`,
             downstream: downstreamNames.join(", "),
         };
-    }, [lineage]);
+    }, [lineage, primaryUpstream, primaryDownstream]);
 
     return (
         <>
@@ -537,22 +646,26 @@ function LineageTab({ lineage, graphData, graphLoading, graphError, onNavigate }
                 <div className="lineage-overview-grid">
                     <StatCard label="Object" value={lineage.object_name} subtle />
                     <StatCard label="Type" value={lineage.object_type || "Object"} subtle />
-                    <StatCard label="Upstream Count" value={lineage.upstream?.length || 0} />
-                    <StatCard label="Downstream Count" value={lineage.downstream?.length || 0} />
+                    <StatCard label="Flow Upstream" value={primaryUpstream.length} />
+                    <StatCard label="Flow Downstream" value={primaryDownstream.length} />
                 </div>
             </div>
 
             <div className="lineage-summary-banner">
                 <div className="lineage-summary-title">Lineage Summary</div>
                 <div className="lineage-summary-text">
-                    Review upstream dependencies to understand source inputs and downstream
-                    dependencies to understand where this object is consumed.
+                    {hasFlow
+                        ? "Showing ETL/view flow dependencies as primary lineage."
+                        : "Flow lineage was not detected, so all available dependencies are shown."}
                 </div>
 
                 <div style={{ marginTop: "10px" }}>
                     <div><strong>Upstream:</strong> {flowText.upstream || "None"}</div>
                     <div><strong>Current:</strong> {flowText.current}</div>
                     <div><strong>Downstream:</strong> {flowText.downstream || "None"}</div>
+                    {hasFlow ? (
+                        <div><strong>Reference links hidden from primary flow:</strong> {referenceCount}</div>
+                    ) : null}
                 </div>
             </div>
 
@@ -565,19 +678,43 @@ function LineageTab({ lineage, graphData, graphLoading, graphError, onNavigate }
 
             <div className="lineage-grid">
                 <LineageList
-                    title="Upstream Dependencies"
-                    items={lineage.upstream || []}
-                    emptyText="No upstream dependencies found."
+                    title={hasFlow ? "Upstream Flow Dependencies" : "Upstream Dependencies"}
+                    items={primaryUpstream}
+                    emptyText={hasFlow ? "No flow-based upstream dependencies found." : "No upstream dependencies found."}
                     onNavigate={onNavigate}
                 />
 
                 <LineageList
-                    title="Downstream Dependencies"
-                    items={lineage.downstream || []}
-                    emptyText="No downstream dependencies found."
+                    title={hasFlow ? "Downstream Flow Dependencies" : "Downstream Dependencies"}
+                    items={primaryDownstream}
+                    emptyText={hasFlow ? "No flow-based downstream dependencies found." : "No downstream dependencies found."}
                     onNavigate={onNavigate}
                 />
             </div>
+
+            {hasFlow && referenceCount ? (
+                <details className="lineage-reference-details">
+                    <summary className="lineage-reference-summary">
+                        Show Reference Links (FK) ({referenceCount})
+                    </summary>
+
+                    <div className="lineage-grid lineage-reference-grid">
+                        <LineageList
+                            title="Upstream Reference Links (FK)"
+                            items={referenceUpstream}
+                            emptyText="No upstream FK references."
+                            onNavigate={onNavigate}
+                        />
+
+                        <LineageList
+                            title="Downstream Reference Links (FK)"
+                            items={referenceDownstream}
+                            emptyText="No downstream FK references."
+                            onNavigate={onNavigate}
+                        />
+                    </div>
+                </details>
+            ) : null}
         </>
     );
 }
@@ -1466,129 +1603,91 @@ export default function LineagePage() {
         }
     }, [ensureActiveBackendConnection]);
 
-    const buildTransitiveLineageGraph = useCallback(async () => {
+    const buildDirectLineageGraph = useCallback(() => {
         const rootKey = makeRelationKey(selectedSchema, selectedObject);
-        if (!rootKey) {
-            return {
-                nodes: [],
-                edges: [],
-                width: 920,
-                height: 260,
-                truncated: false,
-            };
+        if (!rootKey || !lineage) {
+            return { nodes: [], edges: [], width: 920, height: 260, truncated: false };
         }
 
-        const MAX_NODES = 80;
-        const MAX_DEPTH = 5;
-        const queue = [{ schemaName: selectedSchema, objectName: selectedObject, depth: 0 }];
-        const visited = new Set();
+        const { primaryUpstream, primaryDownstream } = splitLineageByKind(lineage);
+
         const nodeMap = new Map();
-        const edgeMap = new Map();
+        const edgeList = [];
 
         nodeMap.set(rootKey, {
             key: rootKey,
             schemaName: selectedSchema,
             objectName: selectedObject,
-            objectType: lineage?.object_type || "OBJECT",
+            objectType: lineage.object_type || "OBJECT",
             isRoot: true,
         });
 
-        let truncated = false;
+        (primaryUpstream || []).forEach((item) => {
+            const key = makeRelationKey(item?.schema_name, item?.object_name);
+            if (!key) return;
+            if (!nodeMap.has(key)) {
+                nodeMap.set(key, {
+                    key,
+                    schemaName: item.schema_name,
+                    objectName: item.object_name,
+                    objectType: item.object_type || "OBJECT",
+                    isRoot: false,
+                });
+            }
+            if (!edgeList.some((e) => e.sourceKey === key && e.targetKey === rootKey)) {
+                edgeList.push({ sourceKey: key, targetKey: rootKey, relationKind: item.relation_kind || "upstream" });
+            }
+        });
 
-        while (queue.length) {
-            const current = queue.shift();
-            const queueKey = makeRelationKey(current.schemaName, current.objectName);
-            if (!queueKey || visited.has(queueKey)) continue;
+        (primaryDownstream || []).forEach((item) => {
+            const key = makeRelationKey(item?.schema_name, item?.object_name);
+            if (!key) return;
+            if (!nodeMap.has(key)) {
+                nodeMap.set(key, {
+                    key,
+                    schemaName: item.schema_name,
+                    objectName: item.object_name,
+                    objectType: item.object_type || "OBJECT",
+                    isRoot: false,
+                });
+            }
+            if (!edgeList.some((e) => e.sourceKey === rootKey && e.targetKey === key)) {
+                edgeList.push({ sourceKey: rootKey, targetKey: key, relationKind: item.relation_kind || "downstream" });
+            }
+        });
 
-            if (visited.size >= MAX_NODES) {
-                truncated = true;
-                break;
+        const rootTier = inferAbsoluteTier(selectedSchema, selectedObject);
+
+        // Build a set of upstream node keys so we can distinguish direction
+        const upstreamKeys = new Set(
+            (primaryUpstream || [])
+                .map((u) => makeRelationKey(u?.schema_name, u?.object_name))
+                .filter(Boolean)
+        );
+
+        const nodes = Array.from(nodeMap.values()).map((n) => {
+            if (n.key === rootKey) return { ...n, isRoot: true, tierDepth: 0 };
+
+            const nodeTier = inferAbsoluteTier(n.schemaName, n.objectName);
+            let tierDepth;
+
+            if (upstreamKeys.has(n.key)) {
+                // Upstream: place to the left. Same-tier upstream (e.g. FK refs) → -1.
+                const diff = rootTier - nodeTier;
+                tierDepth = diff > 0 ? -diff : -1;
+            } else {
+                // Downstream: tier-relative position to the right.
+                // Same-tier downstream (e.g. FK_TARGET in src) → 1.
+                // Staging (tier+1) → 2. Core (tier+2) → 3. etc.
+                tierDepth = Math.max(1, nodeTier - rootTier + 1);
             }
 
-            visited.add(queueKey);
+            return { ...n, isRoot: false, tierDepth };
+        });
 
-            const lineageData = await runWithReconnect((activeId) =>
-                fetchLineage(activeId, selectedDatabase, current.schemaName, current.objectName)
-            );
-
-            const canonicalSchema = lineageData?.schema_name || current.schemaName;
-            const canonicalObject = lineageData?.object_name || current.objectName;
-            const canonicalType = lineageData?.object_type || "OBJECT";
-            const canonicalKey = makeRelationKey(canonicalSchema, canonicalObject);
-
-            nodeMap.set(canonicalKey, {
-                key: canonicalKey,
-                schemaName: canonicalSchema,
-                objectName: canonicalObject,
-                objectType: canonicalType,
-                isRoot: canonicalKey === rootKey,
-            });
-
-            const enqueueNode = (schemaName, objectName, depth) => {
-                if (depth > MAX_DEPTH) return;
-                const nextKey = makeRelationKey(schemaName, objectName);
-                if (!nextKey || visited.has(nextKey)) return;
-                queue.push({ schemaName, objectName, depth });
-            };
-
-            (lineageData?.upstream || []).forEach((item) => {
-                const upstreamKey = makeRelationKey(item?.schema_name, item?.object_name);
-                if (!upstreamKey) return;
-
-                nodeMap.set(upstreamKey, {
-                    key: upstreamKey,
-                    schemaName: item.schema_name,
-                    objectName: item.object_name,
-                    objectType: item.object_type || "OBJECT",
-                    isRoot: upstreamKey === rootKey,
-                });
-
-                const edgeKey = `${upstreamKey}->${canonicalKey}:${item.relation_kind || "related"}`;
-                edgeMap.set(edgeKey, {
-                    sourceKey: upstreamKey,
-                    targetKey: canonicalKey,
-                    relationKind: item.relation_kind || "related",
-                });
-
-                enqueueNode(item.schema_name, item.object_name, current.depth + 1);
-            });
-
-            (lineageData?.downstream || []).forEach((item) => {
-                const downstreamKey = makeRelationKey(item?.schema_name, item?.object_name);
-                if (!downstreamKey) return;
-
-                nodeMap.set(downstreamKey, {
-                    key: downstreamKey,
-                    schemaName: item.schema_name,
-                    objectName: item.object_name,
-                    objectType: item.object_type || "OBJECT",
-                    isRoot: downstreamKey === rootKey,
-                });
-
-                const edgeKey = `${canonicalKey}->${downstreamKey}:${item.relation_kind || "related"}`;
-                edgeMap.set(edgeKey, {
-                    sourceKey: canonicalKey,
-                    targetKey: downstreamKey,
-                    relationKind: item.relation_kind || "related",
-                });
-
-                enqueueNode(item.schema_name, item.object_name, current.depth + 1);
-            });
-        }
-
-        const nodes = Array.from(nodeMap.values()).map((node) => ({
-            ...node,
-            isRoot: node.key === rootKey,
-        }));
-
-        const edges = Array.from(edgeMap.values());
-        const layout = buildLineageGraphLayout(nodes, edges, rootKey);
-
-        return {
-            ...layout,
-            truncated,
-        };
-    }, [lineage, runWithReconnect, selectedDatabase, selectedObject, selectedSchema]);
+        const layout = buildLineageGraphLayout(nodes, edgeList, rootKey);
+        return { ...layout, truncated: false };
+    }, [lineage, selectedObject, selectedSchema]);
 
     const loadTemplates = async () => {
         if (!ready || !connectionId) return;
@@ -1854,9 +1953,7 @@ export default function LineagePage() {
     }, [activeTab, ready, currentLineageKey, refreshLineage]);
 
     useEffect(() => {
-        let cancelled = false;
-
-        if (activeTab !== "lineage" || !ready) {
+        if (activeTab !== "lineage" || !ready || !lineage) {
             setLineageGraphError("");
             setLineageGraphData({
                 nodes: [],
@@ -1865,38 +1962,24 @@ export default function LineagePage() {
                 height: 260,
                 truncated: false,
             });
-            return undefined;
+            return;
         }
 
-        const loadLineageGraph = async () => {
-            setLineageGraphLoading(true);
-            setLineageGraphError("");
-
-            try {
-                const graph = await buildTransitiveLineageGraph();
-                if (cancelled) return;
-                setLineageGraphData(graph);
-            } catch (err) {
-                if (cancelled) return;
-                setLineageGraphError(err.message || "Failed to build lineage graph");
-            } finally {
-                if (!cancelled) {
-                    setLineageGraphLoading(false);
-                }
-            }
-        };
-
-        loadLineageGraph();
-
-        return () => {
-            cancelled = true;
-        };
+        setLineageGraphLoading(true);
+        setLineageGraphError("");
+        try {
+            const graph = buildDirectLineageGraph();
+            setLineageGraphData(graph);
+        } catch (err) {
+            setLineageGraphError(err.message || "Failed to build lineage graph");
+        } finally {
+            setLineageGraphLoading(false);
+        }
     }, [
         activeTab,
         ready,
-        currentLineageKey,
-        lineageFetchedAt,
-        buildTransitiveLineageGraph,
+        lineage,
+        buildDirectLineageGraph,
     ]);
 
     useEffect(() => {
@@ -2122,6 +2205,19 @@ export default function LineagePage() {
     const clearJoinTables = () => {
         setSelectedJoinTables([]);
     };
+
+    const handleSyncTopSelectionFromPipeline = useCallback((nextContext = {}) => {
+        const nextDatabase = String(nextContext.databaseName || "").trim();
+        const nextSchema = String(nextContext.schemaName || "").trim();
+        const nextObject = String(nextContext.objectName || "").trim();
+
+        updateCurrentLineageSelection((prev) => ({
+            ...prev,
+            selectedDatabase: nextDatabase || prev.selectedDatabase,
+            selectedSchema: nextSchema || prev.selectedSchema,
+            selectedObject: nextObject || prev.selectedObject,
+        }));
+    }, [updateCurrentLineageSelection]);
 
     const readyForActions =
         ready && !!connectionPayload?.host && !!connectionPayload?.username;
@@ -2349,6 +2445,7 @@ export default function LineagePage() {
                             currentTransformationSource={currentTransformationSource}
                             pipelineSession={currentPipelineBuilderSession}
                             updatePipelineSession={updatePipelineBuilderSession}
+                            onSyncToGlobalContext={handleSyncTopSelectionFromPipeline}
                         />
                     ) : null}
                 </>

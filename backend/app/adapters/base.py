@@ -26,3 +26,7 @@ class BaseAdapter(ABC):
     @abstractmethod
     def run_query(self, sql: str, limit: int = 100) -> Dict[str, Any]:
         pass
+
+    @abstractmethod
+    def execute_sql(self, sql: str) -> None:
+        pass

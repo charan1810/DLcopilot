@@ -93,6 +93,44 @@ export async function deleteUser(userId) {
     return parseJson(res);
 }
 
+// ── Admin: Connection management ─────────────────────────────
+export async function adminListConnections() {
+    const res = await fetch(`${API_BASE}/api/admin/connections`, {
+        headers: authHeadersGet(),
+    });
+    return parseJson(res);
+}
+
+export async function adminCreateConnection(payload) {
+    const res = await fetch(`${API_BASE}/api/admin/connections`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+    });
+    return parseJson(res);
+}
+
+export async function adminDeleteConnection(connId) {
+    const res = await fetch(`${API_BASE}/api/admin/connections/${connId}`, {
+        method: "DELETE",
+        headers: authHeadersGet(),
+    });
+    if (!res.ok) {
+        let d = null;
+        try { d = await res.json(); } catch { /* ignore */ }
+        throw new Error(d?.detail || "Delete failed");
+    }
+}
+
+export async function adminAssignConnection(userId, connectionId) {
+    const res = await fetch(`${API_BASE}/api/admin/users/${userId}/connection`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ connection_id: connectionId }),
+    });
+    return parseJson(res);
+}
+
 export async function testConnection(payload) {
     const res = await fetch(`${API_BASE}/api/connections/test`, {
         method: "POST",
@@ -512,11 +550,136 @@ export async function agenticGeneratePipelineSteps(pipelineId, userRequirement, 
     return parseJson(res);
 }
 
+export async function validatePipelineSteps(pipelineId, payload = {}) {
+    const res = await fetch(`${API_BASE}/api/pipelines/${pipelineId}/validate-steps`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+    });
+    return parseJson(res);
+}
+
 export async function aiSuggestPipelineMapping(payload) {
     const res = await fetch(`${API_BASE}/api/pipeline-mapping/ai-suggest`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify(payload),
+    });
+    return parseJson(res);
+}
+
+// ============================================================
+// WORKFLOW ORCHESTRATION APIs
+// ============================================================
+
+export async function fetchWorkflows(params = {}) {
+    const search = new URLSearchParams();
+    if (params.connection_id) search.append("connection_id", params.connection_id);
+    if (params.database_name) search.append("database_name", params.database_name);
+
+    const res = await fetch(`${API_BASE}/api/workflows?${search.toString()}`, {
+        headers: authHeadersGet(),
+    });
+    return parseJson(res);
+}
+
+export async function createWorkflow(payload) {
+    const res = await fetch(`${API_BASE}/api/workflows`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+    });
+    return parseJson(res);
+}
+
+export async function getWorkflow(workflowId) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}`, {
+        headers: authHeadersGet(),
+    });
+    return parseJson(res);
+}
+
+export async function updateWorkflow(workflowId, payload) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+    });
+    return parseJson(res);
+}
+
+export async function deleteWorkflow(workflowId) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}`, {
+        method: "DELETE",
+        headers: authHeadersGet(),
+    });
+    return parseJson(res);
+}
+
+export async function updateWorkflowGraph(workflowId, payload) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}/graph`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+    });
+    return parseJson(res);
+}
+
+export async function runWorkflow(workflowId, payload = {}) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}/run`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+            trigger_type: "MANUAL",
+            ...payload,
+        }),
+    });
+    return parseJson(res);
+}
+
+export async function fetchWorkflowRuns(workflowId) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}/runs`, {
+        headers: authHeadersGet(),
+    });
+    return parseJson(res);
+}
+
+export async function fetchWorkflowRun(runId) {
+    const res = await fetch(`${API_BASE}/api/workflow-runs/${runId}`, {
+        headers: authHeadersGet(),
+    });
+    return parseJson(res);
+}
+
+export async function fetchWorkflowSchedule(workflowId) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}/schedule`, {
+        headers: authHeadersGet(),
+    });
+    return parseJson(res);
+}
+
+export async function createWorkflowSchedule(workflowId, payload) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}/schedule`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+    });
+    return parseJson(res);
+}
+
+export async function updateWorkflowSchedule(workflowId, payload) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}/schedule`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify(payload),
+    });
+    return parseJson(res);
+}
+
+export async function deleteWorkflowSchedule(workflowId) {
+    const res = await fetch(`${API_BASE}/api/workflows/${workflowId}/schedule`, {
+        method: "DELETE",
+        headers: authHeadersGet(),
     });
     return parseJson(res);
 }

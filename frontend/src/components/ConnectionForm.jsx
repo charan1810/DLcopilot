@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { saveConnection, testConnection, fetchSavedConnections } from "../api/schemaApi";
 import { useAppContext } from "../context/AppContext";
+import { useAuth } from "../context/AuthContext";
 
 const INITIAL_FORM = {
   name: "DLcopilot Ecommerce Demo",
@@ -16,13 +17,47 @@ const INITIAL_FORM = {
   role: "",
 };
 
+function connectionSignature(conn) {
+  return [
+    (conn?.name || "").trim().toLowerCase(),
+    (conn?.db_type || "").trim().toLowerCase(),
+    (conn?.host || "").trim().toLowerCase(),
+    String(conn?.port || "").trim(),
+    (conn?.database_name || "").trim().toLowerCase(),
+    (conn?.schema_name || "").trim().toLowerCase(),
+    (conn?.username || "").trim().toLowerCase(),
+    (conn?.account || "").trim().toLowerCase(),
+    (conn?.warehouse || "").trim().toLowerCase(),
+    (conn?.role || "").trim().toLowerCase(),
+  ].join("|");
+}
+
+function dedupeConnections(connections = []) {
+  const seen = new Set();
+  const out = [];
+
+  // Walk backward so when duplicates exist we keep the latest saved entry.
+  for (let i = connections.length - 1; i >= 0; i -= 1) {
+    const conn = connections[i];
+    const sig = connectionSignature(conn);
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.unshift(conn);
+  }
+
+  return out;
+}
+
 export default function ConnectionForm({ onConnectionSaved }) {
   const {
+    connectionId,
     connectionPayload,
     setConnectionPayload,
     sessionPassword,
     setSessionPassword,
   } = useAppContext();
+  const { activeConnection, user } = useAuth();
+  const isAdmin = user?.role === "admin";
 
   const [form, setForm] = useState({
     ...INITIAL_FORM,
@@ -42,7 +77,10 @@ export default function ConnectionForm({ onConnectionSaved }) {
     setLoadingConnections(true);
     fetchSavedConnections()
       .then((data) => {
-        if (!cancelled) setExistingConnections(Array.isArray(data) ? data : []);
+        if (!cancelled) {
+          const rows = Array.isArray(data) ? data : [];
+          setExistingConnections(dedupeConnections(rows));
+        }
       })
       .catch(() => { })
       .finally(() => { if (!cancelled) setLoadingConnections(false); });
@@ -56,6 +94,40 @@ export default function ConnectionForm({ onConnectionSaved }) {
       password: sessionPassword || prev.password || "",
     }));
   }, [connectionPayload, sessionPassword]);
+
+  useEffect(() => {
+    if (!activeConnection) return;
+    const assigned = existingConnections.find((c) => c.id === activeConnection.id);
+    if (!assigned) return;
+
+    const nextForm = {
+      name: assigned.name || "",
+      db_type: assigned.db_type || "postgres",
+      host: assigned.host || "localhost",
+      port: assigned.port || "",
+      database_name: assigned.database_name || "",
+      schema_name: assigned.schema_name || "",
+      username: assigned.username || "",
+      password: form.password || "",
+      account: assigned.account || "",
+      warehouse: assigned.warehouse || "",
+      role: assigned.role || "",
+    };
+    setForm(nextForm);
+    // Keep password/session untouched; user can explicitly test/connect.
+    setConnectionPayload({
+      name: nextForm.name,
+      db_type: nextForm.db_type,
+      host: nextForm.host,
+      port: nextForm.port,
+      database_name: nextForm.database_name,
+      schema_name: nextForm.schema_name,
+      username: nextForm.username,
+      account: nextForm.account,
+      warehouse: nextForm.warehouse,
+      role: nextForm.role,
+    });
+  }, [activeConnection, existingConnections, form.password, setConnectionPayload]);
 
   const isPostgres = form.db_type === "postgres";
   const isMySQL = form.db_type === "mysql";
@@ -153,10 +225,26 @@ export default function ConnectionForm({ onConnectionSaved }) {
   });
 
   const handleTest = async () => {
-    setTesting(true);
     setMessage("");
     setError("");
 
+    // Validate required fields
+    if (!form.host || !form.username) {
+      setError("Host and username are required");
+      return;
+    }
+
+    if ((isPostgres || isMySQL) && !form.password) {
+      setError("Password is required for PostgreSQL and MySQL connections");
+      return;
+    }
+
+    if (isSnowflake && !form.password) {
+      setError("Password is required for Snowflake connections");
+      return;
+    }
+
+    setTesting(true);
     try {
       const payload = buildPayload();
       const res = await testConnection(payload);
@@ -170,10 +258,26 @@ export default function ConnectionForm({ onConnectionSaved }) {
   };
 
   const handleSave = async () => {
-    setSaving(true);
     setMessage("");
     setError("");
 
+    // Validate required fields
+    if (!form.name || !form.host || !form.username) {
+      setError("Connection name, host, and username are required");
+      return;
+    }
+
+    if ((isPostgres || isMySQL) && !form.password) {
+      setError("Password is required for PostgreSQL and MySQL connections");
+      return;
+    }
+
+    if (isSnowflake && !form.password) {
+      setError("Password is required for Snowflake connections");
+      return;
+    }
+
+    setSaving(true);
     try {
       const payload = buildPayload();
       const res = await saveConnection(payload);
@@ -225,7 +329,7 @@ export default function ConnectionForm({ onConnectionSaved }) {
           <div className="form-field">
             <label>Use a Saved Connection</label>
             <select
-              defaultValue=""
+              value={connectionId ? String(connectionId) : ""}
               onChange={(e) => e.target.value && handleSelectExisting(e.target.value)}
               disabled={loadingConnections}
             >
@@ -234,10 +338,13 @@ export default function ConnectionForm({ onConnectionSaved }) {
               </option>
               {existingConnections.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name} ({c.db_type} — {c.host}:{c.port}/{c.database_name})
+                  {c.name} ({c.db_type})
                 </option>
               ))}
             </select>
+            <small style={{ display: "block", marginTop: "8px", color: "#666" }}>
+              Note: For security, passwords are not stored with saved connections. You'll need to re-enter the password below.
+            </small>
           </div>
           <div className="saved-connections-divider">
             <span>or create a new connection below</span>
@@ -321,13 +428,16 @@ export default function ConnectionForm({ onConnectionSaved }) {
             </div>
 
             <div className="form-field">
-              <label>Password</label>
+              <label>Password <span style={{ color: "red" }}>*</span></label>
               <input
                 type="password"
                 value={form.password}
                 onChange={(e) => updateField("password", e.target.value)}
                 placeholder="Enter password"
               />
+              <small style={{ display: "block", marginTop: "4px", color: "#666" }}>
+                Required for database authentication
+              </small>
             </div>
           </>
         )}
@@ -385,13 +495,16 @@ export default function ConnectionForm({ onConnectionSaved }) {
             </div>
 
             <div className="form-field">
-              <label>Password</label>
+              <label>Password <span style={{ color: "red" }}>*</span></label>
               <input
                 type="password"
                 value={form.password}
                 onChange={(e) => updateField("password", e.target.value)}
                 placeholder="Enter password"
               />
+              <small style={{ display: "block", marginTop: "4px", color: "#666" }}>
+                Required for Snowflake authentication
+              </small>
             </div>
 
             <div className="form-field">
@@ -411,9 +524,11 @@ export default function ConnectionForm({ onConnectionSaved }) {
         <button onClick={handleTest} disabled={testing}>
           {testing ? "Testing..." : "Test Connection"}
         </button>
-        <button onClick={handleSave} disabled={saving}>
-          {saving ? "Saving..." : "Save Connection"}
-        </button>
+        {isAdmin && (
+          <button onClick={handleSave} disabled={saving}>
+            {saving ? "Saving..." : "Save Connection"}
+          </button>
+        )}
       </div>
 
       {message ? <div className="form-success">{message}</div> : null}

@@ -1,6 +1,7 @@
 from fastapi import HTTPException
 from app.adapters.postgres_adapter import PostgresAdapter
 from app.adapters.mysql_adapter import MySQLAdapter
+from app.adapters.snowflake_adapter import SnowflakeAdapter
 
 
 def get_adapter(db_type: str, config: dict):
@@ -10,5 +11,7 @@ def get_adapter(db_type: str, config: dict):
         return PostgresAdapter(config)
     if db_type == "mysql":
         return MySQLAdapter(config)
+    if db_type == "snowflake":
+        return SnowflakeAdapter(config)
 
     raise HTTPException(status_code=400, detail=f"Unsupported db_type: {db_type}")

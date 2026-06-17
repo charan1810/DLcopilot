@@ -49,7 +49,7 @@ It combines **schema exploration**, **natural language querying**, **data lineag
 
 ## Stack
 
-- Backend: FastAPI, SQLAlchemy, SQLite app store, PostgreSQL/MySQL/Snowflake connectors
+- Backend: FastAPI, SQLAlchemy, PostgreSQL app store, PostgreSQL/MySQL/Snowflake connectors
 - Frontend: React with Vite
 - Auth: JWT-based login/signup with role checks
 - AI: OpenAI API for SQL and metadata assistance

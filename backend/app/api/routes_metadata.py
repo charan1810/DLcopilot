@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_role
 from app.schemas.metadata import (
     SchemasResponse,
     ObjectsResponse,
@@ -12,6 +13,8 @@ from app.schemas.metadata import (
 from app.services.metadata_service import MetadataService
 
 router = APIRouter(prefix="/metadata", tags=["Metadata"])
+
+_architect_or_admin = require_role("admin", "architect")
 
 
 @router.get("/schemas/{connection_id}", response_model=SchemasResponse)
@@ -70,3 +73,26 @@ def get_ddl(
         "object_name": object_name,
         "ddl": ddl,
     }
+
+
+class CreateSchemaRequest(BaseModel):
+    connection_id: int
+    schema_name: str
+    database_name: str = ""
+    password: str = ""
+
+
+@router.post("/create-schema")
+def create_schema(
+    payload: CreateSchemaRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(_architect_or_admin),
+):
+    """Create a schema in the target database. Only architect and admin may do this."""
+    return MetadataService.create_schema(
+        db,
+        payload.connection_id,
+        payload.schema_name,
+        payload.database_name,
+        payload.password,
+    )

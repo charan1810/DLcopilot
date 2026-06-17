@@ -7,7 +7,7 @@ class UserCreate(BaseModel):
     email: str
     full_name: str
     password: str
-    role: str = "tester"  # admin | developer | tester
+    role: str = "tester"  # admin | architect | developer | tester
 
 
 class UserLogin(BaseModel):
@@ -27,6 +27,7 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: Optional[datetime] = None
+    connection_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -36,3 +37,4 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    connection_id: Optional[int] = None

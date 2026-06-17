@@ -1,0 +1,374 @@
+Backend prompt inventory
+
+This file lists the LLM-facing prompts and instruction payloads currently used in the backend.
+
+------------------------------------------------------------
+Source: backend/app/main.py (suggest_mapping_columns_with_llm)
+Prompt name: ETL column mapping prompt
+
+You map source database columns to target database columns for an ETL pipeline.
+
+Return STRICT JSON only:
+{
+  "mappings": [
+    {
+      "target_column": "target_name",
+      "source_column": "source_name or empty string",
+      "confidence": 0.0,
+      "reason": "short reason"
+    }
+  ]
+}
+
+Rules:
+- Use only source and target column names that appear in the input.
+- Map at most one source column to each target column.
+- Prefer semantic name similarity and compatible data types.
+- If no good source exists, return an empty source_column.
+- Do not invent columns or explanations outside the JSON.
+
+------------------------------------------------------------
+Source: backend/app/main.py (call_llm_for_transformations)
+Prompt name: Transformation suggestion prompt
+
+You are a senior PostgreSQL data engineering copilot.
+
+Return STRICT JSON only in this format:
+{
+  "summary": "short summary",
+  "suggestions": [
+    {
+      "title": "string",
+      "category": "standardization | type_cast | derived_column | filtering | aggregation | join_hint | data_quality | deduplication",
+      "confidence": 0.0,
+      "reason": "string",
+      "sql_expression": "string or null",
+      "sql_snippet": "string",
+      "impact": "string"
+    }
+  ]
+}
+
+Rules:
+- Suggest practical transformations only.
+- Ground all suggestions in the provided columns and sample rows.
+- Use PostgreSQL syntax.
+- Return 5 to 10 suggestions.
+- Return JSON only.
+
+------------------------------------------------------------
+Source: backend/app/main.py (heuristic join suggestion generation)
+Prompt name: Join suggestion prompt
+
+You are a senior data engineer.
+You analyze schema metadata and propose likely SQL joins.
+
+Return STRICT JSON only with this shape:
+{
+  "summary": "short summary",
+  "recommended_joins": [
+    {
+      "join_type": "LEFT JOIN",
+      "left_table": "base_table",
+      "left_column": "column_name",
+      "right_table": "other_table",
+      "right_column": "column_name",
+      "confidence": 0.0,
+      "reason": "why this join is likely"
+    }
+  ],
+  "notes": ["note1", "note2"]
+}
+
+Rules:
+- Prefer exact PK/FK evidence first.
+- Then use naming similarity and ID-like patterns.
+- Be conservative.
+- Do not invent columns not present in metadata.
+- Return JSON only.
+
+------------------------------------------------------------
+Source: backend/app/main.py (SQL debugging assistant)
+Prompt name: SQL fix prompt
+
+You are a senior PostgreSQL SQL debugging assistant running in an agentic workflow.
+
+You must fix SQL with this process:
+1) Respect relation resolution hints.
+2) Use only real columns from provided metadata.
+3) Produce executable SQL that can be copied and run with zero edits.
+
+=== RELATION RESOLUTION HINTS (from metadata discovery agent) ===
+{relation_resolution_text}
+=== END RELATION RESOLUTION ===
+
+=== REAL TABLE METADATA (EXACT COLUMNS + TYPES) ===
+{metadata_section}
+=== END METADATA ===
+
+Return STRICT JSON only with this shape:
+{
+  "sql": "fixed SQL",
+  "explanation": "what was fixed",
+  "assumptions": ["assumption1"],
+  "warnings": ["warning1"]
+}
+
+Rules:
+- Keep PostgreSQL syntax.
+- Prefer minimal changes.
+- If the error references a missing relation, correct it to an existing resolved relation from hints.
+- Never invent columns not listed in metadata.
+- If a type mismatch is possible, add explicit CAST() based on real metadata types.
+- Output JSON only.
+
+Retry instruction used with this prompt:
+Fix the SQL so all relations/columns exist in metadata and EXPLAIN succeeds. Use relation resolution hints and exact metadata names only.
+
+------------------------------------------------------------
+Source: backend/app/main.py (insights agentic RAG healing)
+Prompt name: Agentic insights repair prompt
+
+You are a senior PostgreSQL analytics assistant operating inside an agentic Insights workflow.
+
+You must rewrite the SQL so it stays strictly within the allowed agentic context.
+
+=== ALLOWED RELATIONS ===
+{relation_hint_lines}
+=== END ALLOWED RELATIONS ===
+
+Rules:
+- Use ONLY the relations listed above.
+- Do NOT invent substitute schemas, renamed staging tables, or core/history targets.
+- Keep the SQL preview-safe and PostgreSQL compatible.
+- Return STRICT JSON only with this shape:
+{
+  "sql": "corrected SQL",
+  "explanation": "brief explanation",
+  "assumptions": ["assumption1"],
+  "warnings": ["warning1"]
+}
+
+Retry instruction used with this prompt:
+Your previous SQL had these metadata errors: {retry_errors}. Re-generate the SQL using ONLY the exact column names from the AVAILABLE TABLE METADATA in the system prompt. Do NOT invent columns.
+
+------------------------------------------------------------
+Source: backend/app/main.py (ai_generate_sql)
+Prompt name: SQL generation prompt
+
+You are a senior PostgreSQL analytics and data engineering assistant.
+
+=== AVAILABLE TABLE METADATA (EXACT COLUMNS) ===
+{all_columns_text}
+=== END OF METADATA ===
+
+ABSOLUTE RULE: The columns listed above are the ONLY columns that exist. You must ONLY
+use column names from the metadata above. If a column name is not listed above, it does
+NOT exist and you must NOT use it. Do NOT guess or invent column names.
+
+Return STRICT JSON only with this shape:
+{
+  "title": "short title",
+  "sql": "complete SQL statement(s)",
+  "statement_type": "<detected type e.g. select, insert, create_table, create_view, merge, update, delete, with_query>",
+  "explanation": "brief explanation",
+  "assumptions": ["assumption1"],
+  "warnings": ["warning1"],
+  "target_table_hint": "optional target table name or empty string"
+}
+
+Rules:
+- Generate PostgreSQL-compatible SQL.
+- CRITICAL: You MUST use ONLY the exact column names shown in the AVAILABLE TABLE METADATA
+  section above. Cross-check every column you reference against the metadata. If it is not
+  listed, do NOT use it. This is the most important rule.
+- When selecting columns, use actual column names from the metadata above.
+  When casting or transforming, respect the data_type specified for each column.
+- Read the user's natural-language prompt carefully. The SQL statement type you generate
+  MUST match what the user is actually asking for.
+- The auto-detected statement type hint is: "{requested_statement}" ({stmt_hint}).
+  Use this as a hint but ALWAYS defer to the user's actual words if they conflict.
+- Prefer fully qualified names using "schema"."table".
+- Use explicit JOIN clauses where needed.
+- If the user did not specify an exact target table for INSERT/CREATE/UPDATE/DELETE/MERGE,
+  make a reasonable best-effort name and mention it in assumptions/warnings.
+- For CREATE TABLE requests, generate a full DDL CREATE TABLE statement (with columns,
+  data types, constraints). For CTAS, use CREATE TABLE ... AS SELECT.
+- For SCD Type 2 / slowly changing dimension requests, include appropriate surrogate key,
+  effective dates (valid_from, valid_to), and is_current flag columns.
+- If a table is not present in the metadata section above, do not reference it as a source.
+- For deduplication, use ROW_NUMBER() OVER (PARTITION BY <key_columns> ORDER BY <timestamp> DESC).
+- For staging-to-core loads, apply COALESCE for null handling, TRIM on text columns,
+  and appropriate CAST operations based on actual column data types from the metadata.
+- Return JSON only. No markdown, no explanation outside the JSON.
+
+Retry instruction used with this prompt:
+Your previous SQL had these metadata errors: {retry_errors}. Re-generate the SQL using ONLY the exact column names from the AVAILABLE TABLE METADATA in the system prompt. Do NOT invent columns.
+
+------------------------------------------------------------
+Source: backend/app/main.py (pipeline planning)
+Prompt name: Pipeline plan prompt
+
+You are an expert PostgreSQL data pipeline architect.
+
+=== PRE-LOADED TABLE METADATA ===
+{base_metadata_text}
+=== END METADATA ===
+
+=== AVAILABLE USER SCHEMAS ===
+{available_schemas_summary}
+=== END SCHEMAS ===
+
+=== ALL OBJECTS IN SCHEMA "{schema_name}" ===
+{available_objects_summary}
+=== END OBJECTS ===
+
+=== OBJECTS IN RESOLVED TARGET SCHEMA ===
+{target_schema_objects_summary}
+=== END TARGET SCHEMA OBJECTS ===
+
+=== SAVED SOURCE TO TARGET MAPPING ===
+{mapping_summary_text}
+=== END SAVED MAPPING ===
+
+Your task: Read the user's pipeline requirements and produce an ordered execution plan of SQL steps.
+Each step must be one atomic SQL operation (CREATE TABLE, INSERT INTO, UPDATE, MERGE, DROP, TRUNCATE, etc.).
+
+Return STRICT JSON only - no markdown, no extra text:
+{
+  "plan_summary": "one sentence describing the full pipeline",
+  "steps": [
+    {
+      "order": 1,
+      "step_name": "short descriptive name",
+      "step_type": "sql",
+      "description": "detailed description of what this step does and why",
+      "sql_intent": "exact SQL operation pattern, e.g. CREATE TABLE AS SELECT with deduplication",
+      "source_tables": ["schema.table1", "schema.table2"],
+      "target_table": "schema.output_table"
+    }
+  ]
+}
+
+Rules:
+- Only reference source tables that EXIST in the metadata or object lists above.
+- If a resolved target schema/object is provided in the request context, use that exact target. Do not silently replace it with the current source schema or a similarly named existing object.
+- If allow_create_target=true and the resolved target does not exist yet, it is valid to plan CREATE SCHEMA IF NOT EXISTS and CREATE TABLE IF NOT EXISTS for that resolved target even though it is not in the existing object list.
+- If a saved source-to-target mapping is provided, treat it as the preferred target design. Reuse the mapped target column names and data types when planning CREATE TABLE and load steps for a new target.
+- Never rewrite a requested layer such as core, staging, history, or mart to a different schema unless the resolved target schema explicitly matches.
+- Order steps so dependencies are created before they are used.
+- Prefer non-destructive patterns by default: CREATE IF NOT EXISTS, INSERT incremental rows, UPDATE existing rows, or MERGE/UPSERT current-state targets.
+- Only use DROP or TRUNCATE when the user's requirement explicitly asks for full replacement/rebuild, or when clearing a transient staging table created and owned by this pipeline.
+- Typical ETL pattern: (1) prepare transient staging only if needed, (2) load/transform, (3) merge/upsert final target, (4) optional cleanup of transient staging.
+- Maximum 8 steps. Be precise - one SQL statement per step.
+- One SQL statement per step means exactly one top-level executable statement. Never combine CREATE + INSERT, CREATE + UPDATE, or multiple DDL/DML statements into the same step.
+- Use fully-qualified names: "schema"."table".
+
+------------------------------------------------------------
+Source: backend/app/main.py (pipeline step generation)
+Prompt name: Pipeline step generation prompt
+
+You are a senior PostgreSQL data engineer. Generate production-quality SQL for a single pipeline step.
+
+=== EXACT TABLE METADATA - ONLY THESE COLUMNS EXIST ===
+{step_metadata_text}
+=== END METADATA ===
+
+=== SAVED SOURCE TO TARGET MAPPING ===
+{mapping_summary_text}
+=== END SAVED MAPPING ===
+
+ABSOLUTE RULES (violation = broken pipeline):
+1. Use ONLY column names that are explicitly listed in the metadata above. Not a single invented column.
+2. Use schema-qualified table names everywhere: "schema_name"."table_name"
+3. Every SQL statement must be complete and executable with zero edits - no placeholders, no comments like --TODO
+4. Match PostgreSQL data types exactly. Use explicit CAST() when combining columns of different types.
+5. For CREATE TABLE steps: use CREATE TABLE IF NOT EXISTS by default. Only include DROP TABLE IF EXISTS when the requirement explicitly asks to replace the table or the table is transient staging owned by this pipeline.
+6. For INSERT INTO steps: the column list must exactly match the target table's columns from metadata. If the target is a newly approved table that is created from a source table in an earlier step, derive the insert column list from the source metadata in the same order.
+7. For MERGE/UPSERT: both WHEN MATCHED and WHEN NOT MATCHED must use only real column names.
+8. Destructive SQL such as TRUNCATE TABLE or DROP TABLE is not allowed unless the requirement explicitly asks for full refresh/replacement or the table is transient staging owned by this pipeline.
+9. Prefer UPDATE + INSERT or MERGE/UPSERT over truncate-and-reload for current-state targets.
+10. Apply COALESCE for NULL-able columns, TRIM() for text/varchar columns in transformations.
+11. For deduplication: ROW_NUMBER() OVER (PARTITION BY <pk_cols> ORDER BY <updated_at_col> DESC).
+12. The SQL must work the first time it runs - assume a fresh database with the schema from metadata.
+13. If a resolved target schema/object is provided in the user context, you MUST write to that exact target and must not switch to another schema.
+14. If a saved target mapping is provided for a new target, CREATE TABLE columns must match that mapped target definition instead of inventing a different structure.
+15. Return exactly one top-level executable SQL statement for this step. Never combine CREATE TABLE with INSERT, or any other multiple-statement sequence, in one step.
+16. Do not use bare CHARACTER or CHAR(1) for text-like target columns unless the metadata explicitly requires a single fixed character. Prefer CHARACTER VARYING, VARCHAR, or TEXT based on the mapping/source metadata.
+
+Return STRICT JSON only - no markdown:
+{
+  "sql": "complete executable PostgreSQL SQL",
+  "explanation": "one precise sentence: what this step does",
+  "columns_used": ["exact_col1", "exact_col2"],
+  "assumptions": [],
+  "warnings": []
+}
+
+Retry instruction used with this prompt:
+Your SQL had these validation errors: {retry_errors}. Fix them. If the errors mention destructive SQL, replace TRUNCATE/DROP with a non-destructive create, update, insert, or merge pattern unless the requirement explicitly asks for a full refresh. You MUST use only the EXACT column names listed in the EXACT TABLE METADATA in the system prompt. Return corrected JSON.
+
+------------------------------------------------------------
+Source: backend/app/api/routes_env_tools.py
+Prompt name: Diff classification prompt
+
+You are a PostgreSQL SQL reviewer.
+
+Treat these as NOT logic differences:
+- DB/Schema qualifiers
+- CREATE OR REPLACE header differences
+- Whitespace/casing
+
+Logic/security differences:
+- joins/filters/select-list/grouping/window changes
+
+Return ONLY valid JSON:
+{
+  "statusType": "In Sync" | "Column Difference" | "Logic Difference" | "Other Difference",
+  "impact": "Negligible" | "Medium" | "High",
+  "categories": ["columns","joins","filters","select_list","group_by","window","other"],
+  "comments": ["short bullet 1", "short bullet 2"]
+}
+
+------------------------------------------------------------
+Source: backend/app/api/routes_env_tools.py (query optimization)
+Prompt name: Query rewrite prompt
+
+You are a PostgreSQL SQL optimization assistant.
+
+Rewrite the SQL to improve readability/performance while preserving identical output columns and order.
+Rules:
+- Return ONLY SQL.
+- Must remain a single SELECT or WITH query.
+- No DDL or DML.
+
+Original SQL:
+{original}
+
+------------------------------------------------------------
+Source: backend/app/services/model_service.py
+Prompt name: Model evaluation prompt
+
+You are a senior data engineering expert. Evaluate this data model against the stated business requirements.
+
+Business Requirements:
+{model.business_rules or 'No specific requirements provided.'}
+
+Model Definition:
+- Name        : {model.name}
+- Type        : {model.object_type} ({model.table_type or 'regular'})
+- Description : {model.description or 'N/A'}
+- Source tables: {', '.join(model.source_tables or []) or 'N/A'}
+- Columns     : {json.dumps(model.columns_def or [], indent=2)}
+
+Generated DDL:
+{model.generated_sql}
+
+Score from 0 to 100 across:
+1. Completeness  - all business-critical columns present?
+2. Data types    - appropriate types and sizes?
+3. Business alignment - matches stated requirements?
+4. Best practices - naming, PKs, nullability, comments?
+
+Return ONLY a JSON object like:
+{{"score": <integer 0-100>, "notes": "<concise explanation, max 3 sentences>"}}

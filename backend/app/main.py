@@ -9,14 +9,18 @@ from difflib import SequenceMatcher
 from datetime import datetime
 from typing import List, Optional, Any, Dict
 from openai import OpenAI
+from sqlalchemy.orm import Session
 from app.relationships import compute_pk_score, compute_fk_score
 from app.pipeline_builder import router as pipeline_builder_router
 from app.pipeline_builder import set_scheduler as set_pipeline_scheduler
 from app.api.routes_auth import router as auth_router
 from app.api.routes_admin import router as admin_router
 from app.api.routes_env_tools import router as env_tools_router
+from app.api.routes_metadata import router as metadata_router
+from app.api.routes_models import router as models_router
 from app.core.app_store import AppStoreOperationalError, get_app_store_conn, init_app_store
 from app.core.security import get_current_user, require_role
+from app.core.database import get_db
 
 
 # =========================
@@ -43,6 +47,8 @@ app.include_router(pipeline_builder_router)
 app.include_router(auth_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(env_tools_router)
+app.include_router(metadata_router, prefix="/api")
+app.include_router(models_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,6 +60,37 @@ app.add_middleware(
 
 saved_connections = {}
 next_connection_id = 1
+
+
+def _connection_signature(data: dict) -> str:
+    return "|".join([
+        str(data.get("name") or "").strip().lower(),
+        str(data.get("db_type") or "").strip().lower(),
+        str(data.get("host") or "").strip().lower(),
+        str(data.get("port") or "").strip(),
+        str(data.get("database_name") or "").strip().lower(),
+        str(data.get("schema_name") or "").strip().lower(),
+        str(data.get("username") or "").strip().lower(),
+        str(data.get("account") or "").strip().lower(),
+        str(data.get("warehouse") or "").strip().lower(),
+        str(data.get("role") or "").strip().lower(),
+    ])
+
+
+def _dedupe_connection_rows(rows: list[dict]) -> list[dict]:
+    seen = set()
+    out = []
+
+    # Keep the newest row per signature by walking backward on ascending id ordering.
+    for row in reversed(rows):
+        sig = _connection_signature(row)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(row)
+
+    out.reverse()
+    return out
 
 
 def _load_saved_connections():
@@ -77,7 +114,7 @@ def _load_saved_connections():
 
 # ── Auth shortcuts for inline routes ──
 _any_authenticated = Depends(get_current_user)
-_dev_or_admin = Depends(require_role("admin", "developer"))
+_dev_or_admin = Depends(require_role("admin", "architect", "developer"))
 
 
 @app.on_event("startup")
@@ -100,6 +137,7 @@ def on_startup():
             ("hashed_password", "VARCHAR(255) NOT NULL DEFAULT ''"),
             ("role", "VARCHAR(50) NOT NULL DEFAULT 'tester'"),
             ("created_at", "TIMESTAMP DEFAULT NOW()"),
+            ("connection_id", "INTEGER REFERENCES connections(id) ON DELETE SET NULL"),
         ]
         for col_name, col_def in migrations:
             if col_name not in existing:
@@ -271,6 +309,16 @@ def get_saved_connection(conn_id: int):
     conn_data = dict(row)
     saved_connections[conn_id] = conn_data
     return conn_data
+
+
+def ensure_connection_access(current_user, conn_id: int):
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if getattr(current_user, "role", "") == "admin":
+        return
+    assigned_id = getattr(current_user, "connection_id", None)
+    if assigned_id is None or int(assigned_id) != int(conn_id):
+        raise HTTPException(status_code=403, detail="Connection is not assigned to this user")
 
 
 def get_db_connection_by_id(conn_id: int, database_name: str | None = None):
@@ -627,7 +675,12 @@ def get_pipeline_mapping_columns(mapping_config: Dict[str, Any]) -> List[Dict[st
         if not target_column:
             continue
 
-        source_column = normalize_sql_identifier(column.get("source_column") or "")
+        # Support both new source_columns[] array and legacy source_column string
+        raw_sources = column.get("source_columns")
+        if isinstance(raw_sources, list):
+            source_column = normalize_sql_identifier(raw_sources[0]) if raw_sources else ""
+        else:
+            source_column = normalize_sql_identifier(column.get("source_column") or "")
         data_type = str(column.get("data_type") or "text").strip() or "text"
         normalized_columns.append({
             "source_column": source_column,
@@ -855,8 +908,18 @@ def ai_suggest_pipeline_mapping(
         for target_column in target_columns:
             target_name = normalize_sql_identifier(target_column.get("target_column") or "")
             suggestion = suggestion_by_target.get(target_name.lower(), {})
+            suggested_src = suggestion.get("source_column") or ""
+            # Preserve existing source_columns array; replace with suggestion if AI returned one
+            existing_sources = target_column.get("source_columns")
+            if not isinstance(existing_sources, list):
+                legacy = target_column.get("source_column") or ""
+                existing_sources = [legacy] if legacy else []
+            if suggested_src:
+                new_sources = [suggested_src]
+            else:
+                new_sources = existing_sources
             mapped_columns.append({
-                "source_column": suggestion.get("source_column") or target_column.get("source_column") or "",
+                "source_columns": new_sources,
                 "target_column": target_name,
                 "data_type": str(target_column.get("data_type") or "text"),
                 "is_nullable": target_column.get("is_nullable") == "YES" if isinstance(target_column.get("is_nullable"), str) else bool(target_column.get("is_nullable", True)),
@@ -2749,16 +2812,15 @@ def test_connection(payload: ConnectionRequest, _u=_dev_or_admin):
 
 
 @app.get("/api/connections")
-def list_saved_connections(_u=_any_authenticated):
-    """Return all saved connections (shared team resource). Passwords are masked."""
+def list_saved_connections(current_user=Depends(get_current_user)):
+    """Return visible saved connections for the current user. Passwords are masked."""
     conn = get_app_store_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM connections WHERE is_active = TRUE ORDER BY id")
-    rows = cur.fetchall()
+    rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     results = []
-    for row in rows:
-        d = dict(row)
+    for d in _dedupe_connection_rows(rows):
         d.pop("password", None)
         d["is_active"] = bool(d.get("is_active", True))
         results.append(d)
@@ -2766,17 +2828,46 @@ def list_saved_connections(_u=_any_authenticated):
 
 
 @app.post("/api/connections/save")
-def save_connection(payload: ConnectionRequest, current_user=Depends(require_role("admin", "developer"))):
+def save_connection(
+    payload: ConnectionRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role("admin", "developer")),
+):
     global next_connection_id
 
-    connection_id = next_connection_id
-    next_connection_id += 1
+    normalized_payload = {
+        "name": payload.name,
+        "db_type": payload.db_type,
+        "host": payload.host,
+        "port": payload.port,
+        "database_name": payload.database_name or "postgres",
+        "schema_name": payload.schema_name or "src",
+        "username": payload.username,
+        "account": payload.account,
+        "warehouse": payload.warehouse,
+        "role": payload.role,
+    }
+
+    connection_id = None
+
+    conn = get_app_store_conn()
+    cur = conn.cursor()
+
+    # Reuse an existing active connection id if this is an exact duplicate config.
+    cur.execute("SELECT * FROM connections WHERE is_active = TRUE ORDER BY id")
+    existing = [dict(r) for r in cur.fetchall()]
+    target_sig = _connection_signature(normalized_payload)
+    for row in existing:
+        if _connection_signature(row) == target_sig:
+            connection_id = int(row["id"])
+
+    if connection_id is None:
+        connection_id = next_connection_id
+        next_connection_id += 1
 
     conn_data = payload.model_dump()
     saved_connections[connection_id] = conn_data
 
-    conn = get_app_store_conn()
-    cur = conn.cursor()
     cur.execute("""
         INSERT INTO connections (
             id, name, db_type, host, port, database_name, schema_name,
@@ -2814,6 +2905,48 @@ def save_connection(payload: ConnectionRequest, current_user=Depends(require_rol
     conn.commit()
     conn.close()
 
+    # Keep SQLAlchemy connections table in sync so users.connection_id FK remains valid.
+    from app.models.connection import Connection
+    shadow = db.query(Connection).filter(Connection.id == connection_id).first()
+    if not shadow:
+        shadow = Connection(
+            id=connection_id,
+            owner_user_id=current_user.id,
+            name=payload.name,
+            db_type=payload.db_type,
+            host=payload.host,
+            port=payload.port,
+            database_name=payload.database_name,
+            schema_name=payload.schema_name,
+            username=payload.username,
+            password_encrypted=None,
+            account=payload.account,
+            warehouse=payload.warehouse,
+            role=payload.role,
+            is_active=True,
+        )
+        db.add(shadow)
+    else:
+        shadow.owner_user_id = current_user.id
+        shadow.name = payload.name
+        shadow.db_type = payload.db_type
+        shadow.host = payload.host
+        shadow.port = payload.port
+        shadow.database_name = payload.database_name
+        shadow.schema_name = payload.schema_name
+        shadow.username = payload.username
+        shadow.account = payload.account
+        shadow.warehouse = payload.warehouse
+        shadow.role = payload.role
+        shadow.is_active = True
+
+    # Make the newly saved connection the active assignment for this user.
+    from app.models.user import User
+    user = db.query(User).filter(User.id == current_user.id).first()
+    if user:
+        user.connection_id = connection_id
+        db.commit()
+
     return {
         "id": connection_id,
         "owner_user_id": current_user.id,
@@ -2832,6 +2965,7 @@ def save_connection(payload: ConnectionRequest, current_user=Depends(require_rol
 
 @app.get("/api/schema-explorer/databases")
 def get_databases(connection_id: int, _u=_any_authenticated):
+    ensure_connection_access(_u, connection_id)
     conn = get_db_connection_by_id(connection_id, "postgres")
     try:
         cur = conn.cursor()
@@ -2852,6 +2986,7 @@ def get_databases(connection_id: int, _u=_any_authenticated):
 
 @app.get("/api/schema-explorer/schemas")
 def get_schemas(connection_id: int, database_name: str, _u=_any_authenticated):
+    ensure_connection_access(_u, connection_id)
     conn = get_db_connection_by_id(connection_id, database_name)
     try:
         cur = conn.cursor()
@@ -2872,6 +3007,7 @@ def get_schemas(connection_id: int, database_name: str, _u=_any_authenticated):
 
 @app.get("/api/schema-explorer/objects")
 def get_objects(connection_id: int, database_name: str, schema: str, _u=_any_authenticated):
+    ensure_connection_access(_u, connection_id)
     conn = get_db_connection_by_id(connection_id, database_name)
     try:
         cur = conn.cursor()
@@ -2901,6 +3037,7 @@ def get_objects(connection_id: int, database_name: str, schema: str, _u=_any_aut
 
 @app.get("/api/schema-explorer/object-details")
 def get_object_details(connection_id: int, database_name: str, schema: str, object: str, _u=_any_authenticated):
+    ensure_connection_access(_u, connection_id)
     conn = get_db_connection_by_id(connection_id, database_name)
     try:
         cur = conn.cursor()
@@ -2954,6 +3091,7 @@ def get_sample_data(
     limit: int = 25,
     _u=_any_authenticated,
 ):
+    ensure_connection_access(_u, connection_id)
     if limit not in [25, 50, 100]:
         raise HTTPException(status_code=400, detail="Limit must be 25, 50, or 100")
 
@@ -2987,6 +3125,7 @@ def execute_query(
     database_name: str = Query(...),
     _u=_any_authenticated,
 ):
+    ensure_connection_access(_u, connection_id)
     query = payload.query.strip().rstrip(";")
     limit = payload.limit
     offset = payload.offset
@@ -3042,6 +3181,7 @@ def get_relationships(
     database_name: str = Query(...),
     _u=_any_authenticated,
 ):
+    ensure_connection_access(_u, conn_id)
     conn = get_db_connection_by_id(conn_id, database_name)
 
     try:
@@ -3062,6 +3202,7 @@ def get_definition(
     database_name: str = Query(...),
     _u=_any_authenticated,
 ):
+    ensure_connection_access(_u, conn_id)
     conn = get_db_connection_by_id(conn_id, database_name)
 
     try:
@@ -3086,6 +3227,7 @@ def get_lineage(
     object: str = Query(...),
     _u=_any_authenticated,
 ):
+    ensure_connection_access(_u, connection_id)
     conn = get_db_connection_by_id(connection_id, database_name)
 
     try:
@@ -3932,6 +4074,7 @@ class ResolveObjectsRequest(SchemaAliasedRequest):
 @app.post("/api/ai/resolve-objects")
 def resolve_objects(payload: ResolveObjectsRequest, _u=_any_authenticated):
     """Parse a user prompt for table/view references and return matched objects with their columns."""
+    ensure_connection_access(_u, payload.connection_id)
     conn = get_db_connection_by_id(payload.connection_id, payload.database_name)
     try:
         schema_objects = get_schema_objects(conn, payload.schema_name)

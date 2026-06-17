@@ -22,4 +22,4 @@ def save_connection(payload: ConnectionCreate, db: Session = Depends(get_db), cu
 
 @router.get("", response_model=list[ConnectionResponse])
 def list_connections(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    return ConnectionService.list_connections(db)
+    return ConnectionService.list_connections(db, current_user)

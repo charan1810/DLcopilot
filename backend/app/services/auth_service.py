@@ -5,7 +5,7 @@ from app.models.user import User
 from app.schemas.auth import UserCreate, UserUpdate
 from app.core.security import hash_password, verify_password
 
-VALID_ROLES = {"admin", "developer", "tester"}
+VALID_ROLES = {"admin", "architect", "developer", "tester"}
 
 
 class AuthService:
@@ -67,6 +67,9 @@ class AuthService:
 
         if payload.is_active is not None:
             user.is_active = payload.is_active
+
+        if hasattr(payload, "connection_id"):
+            user.connection_id = payload.connection_id
 
         db.commit()
         db.refresh(user)

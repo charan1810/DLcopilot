@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import json
 import logging
 import re
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.core.app_store import AppStoreOperationalError, get_app_store_conn, init_app_store
 from app.core.security import get_current_user, require_role
@@ -16,7 +18,7 @@ except ImportError:
 
 logger = logging.getLogger("pipeline_builder")
 
-_dev_or_admin = require_role("admin", "developer")
+_dev_or_admin = require_role("admin", "architect", "developer")
 
 router = APIRouter(prefix="/api", tags=["pipeline-builder"])
 
@@ -382,6 +384,12 @@ class RetryPipelineRequest(BaseModel):
     allow_ddl_execute: bool = False
 
 
+class ValidatePipelineStepsRequest(BaseModel):
+    steps: List[PipelineStepCreate] = []
+    stop_on_error: bool = False
+    timeout_ms: int = 5000
+
+
 class PipelineScheduleCreate(BaseModel):
     schedule_type: str = "interval"
     cron_expression: Optional[str] = None
@@ -390,6 +398,67 @@ class PipelineScheduleCreate(BaseModel):
 
 
 class PipelineScheduleUpdate(BaseModel):
+    schedule_type: Optional[str] = None
+    cron_expression: Optional[str] = None
+    interval_minutes: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class WorkflowCreate(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    connection_id: int
+    database_name: Optional[str] = ""
+    execution_mode: str = "serial"
+    stop_on_error: bool = True
+    is_active: bool = True
+
+
+class WorkflowUpdate(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    connection_id: int
+    database_name: Optional[str] = ""
+    execution_mode: str = "serial"
+    stop_on_error: bool = True
+    is_active: bool = True
+
+
+class WorkflowNodeInput(BaseModel):
+    id: Optional[int] = None
+    pipeline_id: int
+    node_name: Optional[str] = None
+    pos_x: float = 120
+    pos_y: float = 120
+
+
+class WorkflowEdgeInput(BaseModel):
+    from_node_id: int
+    to_node_id: int
+
+
+class WorkflowGraphUpdate(BaseModel):
+    nodes: List[WorkflowNodeInput] = []
+    edges: List[WorkflowEdgeInput] = []
+
+
+class RunWorkflowRequest(BaseModel):
+    trigger_type: str = "MANUAL"
+    initiated_by: Optional[str] = None
+    allow_ddl_execute: bool = False
+    execution_mode: Optional[str] = None
+    stop_on_error: Optional[bool] = None
+    max_parallel_nodes: int = 4
+
+
+class WorkflowScheduleCreate(BaseModel):
+    schedule_type: str = "interval"
+    cron_expression: Optional[str] = None
+    interval_minutes: Optional[int] = None
+    is_active: bool = True
+
+
+class WorkflowScheduleUpdate(BaseModel):
     schedule_type: Optional[str] = None
     cron_expression: Optional[str] = None
     interval_minutes: Optional[int] = None
@@ -1004,6 +1073,102 @@ def _run_pipeline(
                 pass
 
 
+@router.post("/pipelines/{pipeline_id}/validate-steps")
+def validate_pipeline_steps(pipeline_id: int, payload: ValidatePipelineStepsRequest, _u=Depends(_dev_or_admin)):
+    pipeline = fetch_pipeline_with_steps(pipeline_id)
+
+    if payload.steps:
+        steps_to_validate: List[Dict[str, Any]] = []
+        for idx, step in enumerate(payload.steps, start=1):
+            steps_to_validate.append({
+                "id": idx,
+                "step_order": idx,
+                "step_name": step.step_name,
+                "sql_text": step.sql_text,
+                "is_active": step.is_active,
+            })
+    else:
+        steps_to_validate = [
+            s for s in pipeline.get("steps", [])
+            if _is_active_flag(s.get("is_active", True))
+        ]
+
+    if not steps_to_validate:
+        raise HTTPException(status_code=400, detail="No steps available to validate")
+
+    timeout_ms = max(1000, min(int(payload.timeout_ms or 5000), 30000))
+    stop_on_error = bool(payload.stop_on_error)
+
+    pg_conn = None
+    validation_results: List[Dict[str, Any]] = []
+
+    try:
+        pg_conn = get_postgres_conn(pipeline["connection_id"])
+
+        for step in steps_to_validate:
+            step_order = int(step.get("step_order") or 0)
+            step_name = step.get("step_name") or f"Step {step_order}"
+            sql_text = (step.get("sql_text") or "").strip()
+
+            if not sql_text:
+                validation_results.append({
+                    "step_order": step_order,
+                    "step_name": step_name,
+                    "valid": False,
+                    "error": "SQL is empty.",
+                })
+                if stop_on_error:
+                    break
+                continue
+
+            try:
+                cursor = pg_conn.cursor()
+                cursor.execute("SET LOCAL statement_timeout = %s", (timeout_ms,))
+                cursor.execute(sql_text)
+                cursor.close()
+
+                # Validation mode must not persist any changes.
+                pg_conn.rollback()
+
+                validation_results.append({
+                    "step_order": step_order,
+                    "step_name": step_name,
+                    "valid": True,
+                    "error": None,
+                })
+            except Exception as step_error:
+                pg_conn.rollback()
+                validation_results.append({
+                    "step_order": step_order,
+                    "step_name": step_name,
+                    "valid": False,
+                    "error": safe_error_text(step_error),
+                })
+                if stop_on_error:
+                    break
+
+        all_valid = all(item.get("valid") for item in validation_results) if validation_results else False
+        return {
+            "pipeline_id": pipeline_id,
+            "valid": all_valid,
+            "total_steps": len(steps_to_validate),
+            "validated_steps": len(validation_results),
+            "steps": validation_results,
+            "validation_mode": "dry_run_transaction_rollback",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Validation failed: {safe_error_text(e)}")
+    finally:
+        if pg_conn:
+            try:
+                pg_conn.close()
+            except Exception:
+                pass
+
+
 def _update_schedule_last_run(pipeline_id: int):
     """Update the schedule's last_run_at after a pipeline execution."""
     now = utc_now_str()
@@ -1250,9 +1415,13 @@ def _load_all_schedules():
     cur = conn.cursor()
     cur.execute("SELECT pipeline_id FROM pipeline_schedules WHERE is_active = TRUE")
     rows = cur.fetchall()
+    cur.execute("SELECT workflow_id FROM workflow_schedules WHERE is_active = TRUE")
+    workflow_rows = cur.fetchall()
     conn.close()
     for row in rows:
         _sync_schedule_to_scheduler(row["pipeline_id"])
+    for row in workflow_rows:
+        _sync_workflow_schedule_to_scheduler(row["workflow_id"])
 
 
 def _sync_schedule_to_scheduler(pipeline_id: int):
@@ -1371,3 +1540,1050 @@ def _scheduled_pipeline_run(pipeline_id: int):
         )
     except Exception as e:
         logger.error(f"Scheduled run failed for pipeline {pipeline_id}: {e}")
+
+
+def _normalize_execution_mode(value: str) -> str:
+    normalized = (value or "serial").strip().lower()
+    if normalized not in {"serial", "parallel"}:
+        raise HTTPException(status_code=400, detail="execution_mode must be 'serial' or 'parallel'")
+    return normalized
+
+
+def _validate_workflow_graph(node_ids: List[int], edges: List[Dict[str, Any]]) -> None:
+    node_set = set(node_ids)
+    indegree = {node_id: 0 for node_id in node_set}
+    adjacency: Dict[int, set] = {node_id: set() for node_id in node_set}
+
+    for edge in edges:
+        from_node_id = int(edge.get("from_node_id") or 0)
+        to_node_id = int(edge.get("to_node_id") or 0)
+
+        if from_node_id not in node_set or to_node_id not in node_set:
+            raise HTTPException(status_code=400, detail="Workflow edge references an unknown node")
+        if from_node_id == to_node_id:
+            raise HTTPException(status_code=400, detail="Workflow edge cannot point to the same node")
+        if to_node_id in adjacency[from_node_id]:
+            continue
+
+        adjacency[from_node_id].add(to_node_id)
+        indegree[to_node_id] += 1
+
+    queue = deque(node_id for node_id, deg in indegree.items() if deg == 0)
+    visited = 0
+
+    while queue:
+        current = queue.popleft()
+        visited += 1
+        for downstream in adjacency[current]:
+            indegree[downstream] -= 1
+            if indegree[downstream] == 0:
+                queue.append(downstream)
+
+    if visited != len(node_set):
+        raise HTTPException(status_code=400, detail="Workflow graph contains a cycle")
+
+
+def _fetch_workflow_graph(workflow_id: int) -> Dict[str, Any]:
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,))
+    workflow_row = cur.fetchone()
+    if not workflow_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    cur.execute(
+        """
+        SELECT wn.*, p.name AS pipeline_name
+        FROM workflow_nodes wn
+        JOIN pipelines p ON p.id = wn.pipeline_id
+        WHERE wn.workflow_id = ?
+        ORDER BY wn.id ASC
+        """,
+        (workflow_id,),
+    )
+    node_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM workflow_edges
+        WHERE workflow_id = ?
+        ORDER BY id ASC
+        """,
+        (workflow_id,),
+    )
+    edge_rows = cur.fetchall()
+    conn.close()
+
+    workflow = row_to_dict(workflow_row)
+    workflow["nodes"] = [row_to_dict(row) for row in node_rows]
+    workflow["edges"] = [row_to_dict(row) for row in edge_rows]
+    return workflow
+
+
+def _upsert_workflow_run_node(
+    workflow_run_id: int,
+    workflow_id: int,
+    node_id: int,
+    pipeline_id: int,
+    execution_group: int = 0,
+):
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO workflow_run_nodes (
+            workflow_run_id, workflow_id, node_id, pipeline_id,
+            status, execution_group, started_at, ended_at, duration_seconds,
+            error_message, node_log
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            workflow_run_id,
+            workflow_id,
+            node_id,
+            pipeline_id,
+            "PENDING",
+            execution_group,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+    )
+    run_node_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return run_node_id
+
+
+def _update_workflow_run_node(run_node_id: int, **kwargs):
+    allowed = {
+        "pipeline_run_id",
+        "status",
+        "execution_group",
+        "started_at",
+        "ended_at",
+        "duration_seconds",
+        "error_message",
+        "node_log",
+    }
+    fields = []
+    values = []
+
+    for key, value in kwargs.items():
+        if key in allowed:
+            fields.append(f"{key} = ?")
+            values.append(value)
+
+    if not fields:
+        return
+
+    values.append(run_node_id)
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        UPDATE workflow_run_nodes
+        SET {", ".join(fields)}
+        WHERE id = ?
+        """,
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _update_workflow_run(
+    workflow_run_id: int,
+    status: str,
+    ended_at: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+    success_nodes: Optional[int] = None,
+    failed_nodes: Optional[int] = None,
+    skipped_nodes: Optional[int] = None,
+    error_message: Optional[str] = None,
+    run_log: Optional[str] = None,
+):
+    fields = ["status = ?"]
+    values: List[Any] = [status]
+
+    if ended_at is not None:
+        fields.append("ended_at = ?")
+        values.append(ended_at)
+    if duration_seconds is not None:
+        fields.append("duration_seconds = ?")
+        values.append(duration_seconds)
+    if success_nodes is not None:
+        fields.append("success_nodes = ?")
+        values.append(success_nodes)
+    if failed_nodes is not None:
+        fields.append("failed_nodes = ?")
+        values.append(failed_nodes)
+    if skipped_nodes is not None:
+        fields.append("skipped_nodes = ?")
+        values.append(skipped_nodes)
+    if error_message is not None:
+        fields.append("error_message = ?")
+        values.append(error_message)
+    if run_log is not None:
+        fields.append("run_log = ?")
+        values.append(run_log)
+
+    values.append(workflow_run_id)
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        UPDATE workflow_runs
+        SET {", ".join(fields)}
+        WHERE id = ?
+        """,
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _get_workflow_run_response(workflow_run_id: int):
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT wr.*, w.name AS workflow_name
+        FROM workflow_runs wr
+        LEFT JOIN workflows w ON w.id = wr.workflow_id
+        WHERE wr.id = ?
+        """,
+        (workflow_run_id,),
+    )
+    run_row = cur.fetchone()
+    if not run_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+
+    cur.execute(
+        """
+        SELECT wrn.*, wn.node_name, p.name AS pipeline_name
+        FROM workflow_run_nodes wrn
+        LEFT JOIN workflow_nodes wn ON wn.id = wrn.node_id
+        LEFT JOIN pipelines p ON p.id = wrn.pipeline_id
+        WHERE wrn.workflow_run_id = ?
+        ORDER BY wrn.execution_group ASC, wrn.id ASC
+        """,
+        (workflow_run_id,),
+    )
+    node_rows = cur.fetchall()
+    conn.close()
+
+    data = row_to_dict(run_row)
+    data["nodes"] = [row_to_dict(row) for row in node_rows]
+    return data
+
+
+@router.get("/workflows")
+def list_workflows(connection_id: Optional[int] = None, database_name: Optional[str] = None, _u=Depends(get_current_user)):
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+
+    query = "SELECT * FROM workflows WHERE 1=1"
+    params: List[Any] = []
+
+    if connection_id is not None:
+        query += " AND connection_id = ?"
+        params.append(connection_id)
+    if database_name:
+        query += " AND database_name = ?"
+        params.append(database_name)
+
+    query += " ORDER BY updated_at DESC, id DESC"
+    cur.execute(query, params)
+    workflow_rows = cur.fetchall()
+
+    workflows = []
+    for row in workflow_rows:
+        workflow = row_to_dict(row)
+        cur.execute("SELECT COUNT(*) AS total_nodes FROM workflow_nodes WHERE workflow_id = ?", (workflow["id"],))
+        node_count_row = cur.fetchone()
+        cur.execute("SELECT COUNT(*) AS total_edges FROM workflow_edges WHERE workflow_id = ?", (workflow["id"],))
+        edge_count_row = cur.fetchone()
+        workflow["node_count"] = int((node_count_row or {}).get("total_nodes") or 0)
+        workflow["edge_count"] = int((edge_count_row or {}).get("total_edges") or 0)
+        workflows.append(workflow)
+
+    conn.close()
+    return workflows
+
+
+@router.post("/workflows")
+def create_workflow(payload: WorkflowCreate, _u=Depends(_dev_or_admin)):
+    execution_mode = _normalize_execution_mode(payload.execution_mode)
+    now = utc_now_str()
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO workflows (
+            name, description, connection_id, database_name,
+            execution_mode, stop_on_error, is_active, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload.name,
+            payload.description,
+            payload.connection_id,
+            payload.database_name,
+            execution_mode,
+            payload.stop_on_error,
+            payload.is_active,
+            now,
+            now,
+        ),
+    )
+    workflow_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    return _fetch_workflow_graph(workflow_id)
+
+
+@router.get("/workflows/{workflow_id}")
+def get_workflow(workflow_id: int, _u=Depends(get_current_user)):
+    return _fetch_workflow_graph(workflow_id)
+
+
+@router.put("/workflows/{workflow_id}")
+def update_workflow(workflow_id: int, payload: WorkflowUpdate, _u=Depends(_dev_or_admin)):
+    execution_mode = _normalize_execution_mode(payload.execution_mode)
+    now = utc_now_str()
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM workflows WHERE id = ?", (workflow_id,))
+    if not cur.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    cur.execute(
+        """
+        UPDATE workflows
+        SET name = ?, description = ?, connection_id = ?, database_name = ?,
+            execution_mode = ?, stop_on_error = ?, is_active = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            payload.name,
+            payload.description,
+            payload.connection_id,
+            payload.database_name,
+            execution_mode,
+            payload.stop_on_error,
+            payload.is_active,
+            now,
+            workflow_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return _fetch_workflow_graph(workflow_id)
+
+
+@router.delete("/workflows/{workflow_id}")
+def delete_workflow(workflow_id: int, _u=Depends(_dev_or_admin)):
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM workflows WHERE id = ?", (workflow_id,))
+    if not cur.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    cur.execute("DELETE FROM workflow_schedules WHERE workflow_id = ?", (workflow_id,))
+    cur.execute("DELETE FROM workflow_run_nodes WHERE workflow_id = ?", (workflow_id,))
+    cur.execute("DELETE FROM workflow_runs WHERE workflow_id = ?", (workflow_id,))
+    cur.execute("DELETE FROM workflow_edges WHERE workflow_id = ?", (workflow_id,))
+    cur.execute("DELETE FROM workflow_nodes WHERE workflow_id = ?", (workflow_id,))
+    cur.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
+    conn.commit()
+    conn.close()
+
+    _remove_workflow_schedule_from_scheduler(workflow_id)
+    return {"status": "success", "message": "Workflow deleted successfully"}
+
+
+@router.put("/workflows/{workflow_id}/graph")
+def update_workflow_graph(workflow_id: int, payload: WorkflowGraphUpdate, _u=Depends(_dev_or_admin)):
+    now = utc_now_str()
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id FROM workflows WHERE id = ?", (workflow_id,))
+    if not cur.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    cur.execute("SELECT id, pipeline_id FROM workflow_nodes WHERE workflow_id = ?", (workflow_id,))
+    existing_nodes = {int(row["id"]): int(row["pipeline_id"]) for row in cur.fetchall()}
+
+    retained_node_ids = set()
+
+    for node in payload.nodes:
+        if node.id and int(node.id) in existing_nodes:
+            node_id = int(node.id)
+            cur.execute(
+                """
+                UPDATE workflow_nodes
+                SET pipeline_id = ?, node_name = ?, pos_x = ?, pos_y = ?, updated_at = ?
+                WHERE id = ? AND workflow_id = ?
+                """,
+                (
+                    node.pipeline_id,
+                    node.node_name,
+                    node.pos_x,
+                    node.pos_y,
+                    now,
+                    node_id,
+                    workflow_id,
+                ),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO workflow_nodes (workflow_id, pipeline_id, node_name, pos_x, pos_y, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workflow_id,
+                    node.pipeline_id,
+                    node.node_name,
+                    node.pos_x,
+                    node.pos_y,
+                    now,
+                    now,
+                ),
+            )
+            node_id = int(cur.lastrowid)
+
+        retained_node_ids.add(node_id)
+
+    if retained_node_ids:
+        placeholders = ",".join(["?"] * len(retained_node_ids))
+        cur.execute(
+            f"DELETE FROM workflow_nodes WHERE workflow_id = ? AND id NOT IN ({placeholders})",
+            [workflow_id, *sorted(retained_node_ids)],
+        )
+    else:
+        cur.execute("DELETE FROM workflow_nodes WHERE workflow_id = ?", (workflow_id,))
+
+    cur.execute("DELETE FROM workflow_edges WHERE workflow_id = ?", (workflow_id,))
+
+    edges_to_insert: List[Dict[str, Any]] = []
+    for edge in payload.edges:
+        if edge.from_node_id not in retained_node_ids or edge.to_node_id not in retained_node_ids:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Edge references a missing node")
+        edges_to_insert.append({"from_node_id": edge.from_node_id, "to_node_id": edge.to_node_id})
+
+    _validate_workflow_graph(sorted(retained_node_ids), edges_to_insert)
+
+    unique_pairs = set()
+    for edge in edges_to_insert:
+        pair = (int(edge["from_node_id"]), int(edge["to_node_id"]))
+        if pair in unique_pairs:
+            continue
+        unique_pairs.add(pair)
+        cur.execute(
+            """
+            INSERT INTO workflow_edges (workflow_id, from_node_id, to_node_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (workflow_id, pair[0], pair[1], now),
+        )
+
+    cur.execute("UPDATE workflows SET updated_at = ? WHERE id = ?", (now, workflow_id))
+    conn.commit()
+    conn.close()
+    return _fetch_workflow_graph(workflow_id)
+
+
+def _execute_workflow_node(
+    workflow_run_id: int,
+    run_node_id: int,
+    node: Dict[str, Any],
+    trigger_type: str,
+    initiated_by: Optional[str],
+    allow_ddl_execute: bool,
+    execution_group: int,
+):
+    step_started = utc_now_str()
+    _update_workflow_run_node(
+        run_node_id,
+        status="RUNNING",
+        started_at=step_started,
+        execution_group=execution_group,
+        node_log=f"Running pipeline {node['pipeline_id']} from workflow run {workflow_run_id}",
+    )
+
+    try:
+        run_response = _run_pipeline(
+            int(node["pipeline_id"]),
+            stop_on_error=True,
+            trigger_type=trigger_type,
+            initiated_by=initiated_by,
+            allow_ddl_execute=allow_ddl_execute,
+        )
+        step_ended = utc_now_str()
+        duration = compute_duration(step_started, step_ended)
+        _update_workflow_run_node(
+            run_node_id,
+            status="SUCCESS",
+            pipeline_run_id=run_response.get("id"),
+            ended_at=step_ended,
+            duration_seconds=duration,
+            node_log=f"Pipeline run {run_response.get('id')} completed successfully",
+        )
+        return {
+            "node_id": int(node["id"]),
+            "status": "SUCCESS",
+            "pipeline_run_id": run_response.get("id"),
+            "error": None,
+            "duration": duration,
+        }
+    except Exception as exc:
+        err_text = safe_error_text(exc)
+        step_ended = utc_now_str()
+        duration = compute_duration(step_started, step_ended)
+        _update_workflow_run_node(
+            run_node_id,
+            status="FAILED",
+            ended_at=step_ended,
+            duration_seconds=duration,
+            error_message=err_text,
+            node_log=f"Execution failed: {err_text}",
+        )
+        return {
+            "node_id": int(node["id"]),
+            "status": "FAILED",
+            "pipeline_run_id": None,
+            "error": err_text,
+            "duration": duration,
+        }
+
+
+@router.post("/workflows/{workflow_id}/run")
+def run_workflow(workflow_id: int, payload: RunWorkflowRequest, _u=Depends(_dev_or_admin)):
+    workflow = _fetch_workflow_graph(workflow_id)
+    nodes = workflow.get("nodes", [])
+    edges = workflow.get("edges", [])
+
+    if not nodes:
+        raise HTTPException(status_code=400, detail="Workflow has no nodes to run")
+
+    execution_mode = _normalize_execution_mode(payload.execution_mode or workflow.get("execution_mode") or "serial")
+    stop_on_error = workflow.get("stop_on_error") if payload.stop_on_error is None else payload.stop_on_error
+    max_parallel = max(1, min(int(payload.max_parallel_nodes or 4), 8))
+
+    node_ids = [int(node["id"]) for node in nodes]
+    _validate_workflow_graph(node_ids, edges)
+
+    node_by_id = {int(node["id"]): node for node in nodes}
+    adjacency: Dict[int, List[int]] = {node_id: [] for node_id in node_ids}
+    indegree = {node_id: 0 for node_id in node_ids}
+    predecessors: Dict[int, set] = {node_id: set() for node_id in node_ids}
+
+    for edge in edges:
+        from_node_id = int(edge["from_node_id"])
+        to_node_id = int(edge["to_node_id"])
+        adjacency[from_node_id].append(to_node_id)
+        indegree[to_node_id] += 1
+        predecessors[to_node_id].add(from_node_id)
+
+    started_at = utc_now_str()
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO workflow_runs (
+            workflow_id, status, trigger_type, started_at, ended_at,
+            duration_seconds, total_nodes, success_nodes, failed_nodes, skipped_nodes,
+            error_message, initiated_by, run_log
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            workflow_id,
+            "RUNNING",
+            payload.trigger_type or "MANUAL",
+            started_at,
+            None,
+            None,
+            len(node_ids),
+            0,
+            0,
+            0,
+            None,
+            payload.initiated_by,
+            None,
+        ),
+    )
+    workflow_run_id = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+
+    run_node_ids: Dict[int, int] = {}
+    for node in nodes:
+        run_node_ids[int(node["id"])] = _upsert_workflow_run_node(
+            workflow_run_id,
+            workflow_id,
+            int(node["id"]),
+            int(node["pipeline_id"]),
+            execution_group=0,
+        )
+
+    success_nodes = set()
+    failed_nodes = set()
+    skipped_nodes = set()
+    pending_nodes = set(node_ids)
+    run_logs: List[str] = []
+    first_error: Optional[str] = None
+    execution_group = 0
+
+    def choose_ready_nodes() -> List[int]:
+        candidates = []
+        for node_id in sorted(pending_nodes):
+            if indegree[node_id] != 0:
+                continue
+            if any(pred in failed_nodes or pred in skipped_nodes for pred in predecessors[node_id]):
+                continue
+            candidates.append(node_id)
+        return candidates
+
+    while pending_nodes:
+        ready_nodes = choose_ready_nodes()
+        if not ready_nodes:
+            for node_id in sorted(pending_nodes):
+                skipped_nodes.add(node_id)
+                run_node_id = run_node_ids[node_id]
+                _update_workflow_run_node(
+                    run_node_id,
+                    status="SKIPPED",
+                    ended_at=utc_now_str(),
+                    error_message="Skipped because one or more upstream nodes failed",
+                    node_log="Skipped due to failed dependency",
+                )
+                run_logs.append(f"Node {node_id}: SKIPPED (failed dependency)")
+            pending_nodes.clear()
+            break
+
+        execution_group += 1
+        current_batch = ready_nodes if execution_mode == "parallel" else [ready_nodes[0]]
+
+        results: List[Dict[str, Any]] = []
+        if execution_mode == "parallel" and len(current_batch) > 1:
+            workers = min(max_parallel, len(current_batch))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                future_map = {}
+                for node_id in current_batch:
+                    node = node_by_id[node_id]
+                    run_node_id = run_node_ids[node_id]
+                    future = pool.submit(
+                        _execute_workflow_node,
+                        workflow_run_id,
+                        run_node_id,
+                        node,
+                        payload.trigger_type or "WORKFLOW",
+                        payload.initiated_by,
+                        payload.allow_ddl_execute,
+                        execution_group,
+                    )
+                    future_map[future] = node_id
+                for future in as_completed(future_map):
+                    results.append(future.result())
+        else:
+            for node_id in current_batch:
+                node = node_by_id[node_id]
+                run_node_id = run_node_ids[node_id]
+                results.append(
+                    _execute_workflow_node(
+                        workflow_run_id,
+                        run_node_id,
+                        node,
+                        payload.trigger_type or "WORKFLOW",
+                        payload.initiated_by,
+                        payload.allow_ddl_execute,
+                        execution_group,
+                    )
+                )
+
+        current_failed = False
+        for result in results:
+            node_id = int(result["node_id"])
+            pending_nodes.discard(node_id)
+
+            if result["status"] == "SUCCESS":
+                success_nodes.add(node_id)
+                run_logs.append(
+                    f"Node {node_id}: SUCCESS (pipeline_run_id={result.get('pipeline_run_id')}, duration={result.get('duration')}s)"
+                )
+                for downstream in adjacency[node_id]:
+                    indegree[downstream] -= 1
+            else:
+                current_failed = True
+                failed_nodes.add(node_id)
+                err_text = result.get("error") or "Unknown error"
+                run_logs.append(f"Node {node_id}: FAILED - {err_text}")
+                if first_error is None:
+                    first_error = err_text
+
+        if current_failed and stop_on_error:
+            for node_id in sorted(pending_nodes):
+                skipped_nodes.add(node_id)
+                _update_workflow_run_node(
+                    run_node_ids[node_id],
+                    status="SKIPPED",
+                    ended_at=utc_now_str(),
+                    error_message="Skipped because workflow is configured to stop on first error",
+                    node_log="Skipped due to stop_on_error behavior",
+                )
+                run_logs.append(f"Node {node_id}: SKIPPED (stop_on_error)")
+            pending_nodes.clear()
+            break
+
+    ended_at = utc_now_str()
+    duration = compute_duration(started_at, ended_at)
+    success_count = len(success_nodes)
+    failed_count = len(failed_nodes)
+    skipped_count = len(skipped_nodes)
+
+    if failed_count == 0 and skipped_count == 0:
+        final_status = "SUCCESS"
+    elif success_count == 0:
+        final_status = "FAILED"
+    else:
+        final_status = "PARTIAL_SUCCESS"
+
+    _update_workflow_run(
+        workflow_run_id,
+        status=final_status,
+        ended_at=ended_at,
+        duration_seconds=duration,
+        success_nodes=success_count,
+        failed_nodes=failed_count,
+        skipped_nodes=skipped_count,
+        error_message=first_error,
+        run_log="\n".join(run_logs),
+    )
+
+    _update_workflow_schedule_last_run(workflow_id)
+    return _get_workflow_run_response(workflow_run_id)
+
+
+@router.get("/workflows/{workflow_id}/runs")
+def list_workflow_runs(workflow_id: int, _u=Depends(get_current_user)):
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM workflows WHERE id = ?", (workflow_id,))
+    if not cur.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    cur.execute(
+        """
+        SELECT *
+        FROM workflow_runs
+        WHERE workflow_id = ?
+        ORDER BY id DESC
+        """,
+        (workflow_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [row_to_dict(row) for row in rows]
+
+
+@router.get("/workflow-runs/{workflow_run_id}")
+def get_workflow_run(workflow_run_id: int, _u=Depends(get_current_user)):
+    return _get_workflow_run_response(workflow_run_id)
+
+
+def _update_workflow_schedule_last_run(workflow_id: int):
+    now = utc_now_str()
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE workflow_schedules SET last_run_at = ?, updated_at = ? WHERE workflow_id = ?",
+        (now, now, workflow_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+@router.post("/workflows/{workflow_id}/schedule")
+def create_workflow_schedule(workflow_id: int, payload: WorkflowScheduleCreate, _u=Depends(_dev_or_admin)):
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM workflows WHERE id = ?", (workflow_id,))
+    if not cur.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    cur.execute("SELECT id FROM workflow_schedules WHERE workflow_id = ?", (workflow_id,))
+    if cur.fetchone():
+        conn.close()
+        raise HTTPException(status_code=409, detail="Schedule already exists for this workflow. Use PUT to update.")
+
+    if payload.schedule_type == "cron" and not payload.cron_expression:
+        conn.close()
+        raise HTTPException(status_code=400, detail="cron_expression is required for cron schedule type")
+    if payload.schedule_type == "interval" and not payload.interval_minutes:
+        conn.close()
+        raise HTTPException(status_code=400, detail="interval_minutes is required for interval schedule type")
+
+    now = utc_now_str()
+    cur.execute(
+        """
+        INSERT INTO workflow_schedules (
+            workflow_id, schedule_type, cron_expression, interval_minutes,
+            is_active, last_run_at, next_run_at, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            workflow_id,
+            payload.schedule_type,
+            payload.cron_expression,
+            payload.interval_minutes,
+            payload.is_active,
+            None,
+            None,
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    _sync_workflow_schedule_to_scheduler(workflow_id)
+    return _get_workflow_schedule_response(workflow_id)
+
+
+@router.get("/workflows/{workflow_id}/schedule")
+def get_workflow_schedule(workflow_id: int, _u=Depends(get_current_user)):
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM workflows WHERE id = ?", (workflow_id,))
+    if not cur.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    conn.close()
+    return _get_workflow_schedule_response(workflow_id)
+
+
+@router.put("/workflows/{workflow_id}/schedule")
+def update_workflow_schedule(workflow_id: int, payload: WorkflowScheduleUpdate, _u=Depends(_dev_or_admin)):
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM workflow_schedules WHERE workflow_id = ?", (workflow_id,))
+    if not cur.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="No schedule found for this workflow")
+
+    fields = []
+    values: List[Any] = []
+    if payload.schedule_type is not None:
+        fields.append("schedule_type = ?")
+        values.append(payload.schedule_type)
+    if payload.cron_expression is not None:
+        fields.append("cron_expression = ?")
+        values.append(payload.cron_expression)
+    if payload.interval_minutes is not None:
+        fields.append("interval_minutes = ?")
+        values.append(payload.interval_minutes)
+    if payload.is_active is not None:
+        fields.append("is_active = ?")
+        values.append(payload.is_active)
+
+    if not fields:
+        conn.close()
+        return _get_workflow_schedule_response(workflow_id)
+
+    now = utc_now_str()
+    fields.append("updated_at = ?")
+    values.append(now)
+    values.append(workflow_id)
+
+    cur.execute(
+        f"""
+        UPDATE workflow_schedules
+        SET {", ".join(fields)}
+        WHERE workflow_id = ?
+        """,
+        values,
+    )
+    conn.commit()
+    conn.close()
+
+    _sync_workflow_schedule_to_scheduler(workflow_id)
+    return _get_workflow_schedule_response(workflow_id)
+
+
+@router.delete("/workflows/{workflow_id}/schedule")
+def delete_workflow_schedule(workflow_id: int, _u=Depends(_dev_or_admin)):
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM workflow_schedules WHERE workflow_id = ?", (workflow_id,))
+    if not cur.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="No schedule found for this workflow")
+
+    cur.execute("DELETE FROM workflow_schedules WHERE workflow_id = ?", (workflow_id,))
+    conn.commit()
+    conn.close()
+    _remove_workflow_schedule_from_scheduler(workflow_id)
+
+    return {"status": "success", "message": "Workflow schedule deleted"}
+
+
+def _get_workflow_schedule_response(workflow_id: int) -> dict:
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT ws.*, w.name AS workflow_name
+        FROM workflow_schedules ws
+        LEFT JOIN workflows w ON w.id = ws.workflow_id
+        WHERE ws.workflow_id = ?
+        """,
+        (workflow_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return {"schedule": None, "workflow_id": workflow_id}
+
+    data = row_to_dict(row)
+    next_run = _get_workflow_next_run_time(workflow_id)
+    if next_run:
+        data["next_run_at"] = next_run
+    return data
+
+
+def _sync_workflow_schedule_to_scheduler(workflow_id: int):
+    if _scheduler_ref is None:
+        return
+
+    conn = get_sqlite_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM workflow_schedules WHERE workflow_id = ?", (workflow_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        _remove_workflow_schedule_from_scheduler(workflow_id)
+        return
+
+    schedule = row_to_dict(row)
+    job_id = f"workflow_schedule_{workflow_id}"
+
+    try:
+        _scheduler_ref.remove_job(job_id)
+    except Exception:
+        pass
+
+    if not schedule.get("is_active"):
+        return
+
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    try:
+        if schedule["schedule_type"] == "cron" and schedule.get("cron_expression"):
+            parts = schedule["cron_expression"].strip().split()
+            if len(parts) == 5:
+                trigger = CronTrigger(
+                    minute=parts[0],
+                    hour=parts[1],
+                    day=parts[2],
+                    month=parts[3],
+                    day_of_week=parts[4],
+                )
+            else:
+                trigger = CronTrigger.from_crontab(schedule["cron_expression"])
+
+            _scheduler_ref.add_job(
+                _scheduled_workflow_run,
+                trigger=trigger,
+                args=[workflow_id],
+                id=job_id,
+                replace_existing=True,
+                name=f"Workflow {workflow_id} (cron)",
+            )
+        elif schedule["schedule_type"] == "interval" and schedule.get("interval_minutes"):
+            trigger = IntervalTrigger(minutes=schedule["interval_minutes"])
+            _scheduler_ref.add_job(
+                _scheduled_workflow_run,
+                trigger=trigger,
+                args=[workflow_id],
+                id=job_id,
+                replace_existing=True,
+                name=f"Workflow {workflow_id} (interval {schedule['interval_minutes']}m)",
+            )
+
+        job = _scheduler_ref.get_job(job_id)
+        if job and job.next_run_time:
+            next_run_str = job.next_run_time.isoformat(timespec="seconds")
+            now = utc_now_str()
+            db_conn = get_sqlite_conn()
+            db_cur = db_conn.cursor()
+            db_cur.execute(
+                "UPDATE workflow_schedules SET next_run_at = ?, updated_at = ? WHERE workflow_id = ?",
+                (next_run_str, now, workflow_id),
+            )
+            db_conn.commit()
+            db_conn.close()
+    except Exception as exc:
+        logger.error(f"Failed to sync schedule for workflow {workflow_id}: {exc}")
+
+
+def _remove_workflow_schedule_from_scheduler(workflow_id: int):
+    if _scheduler_ref is None:
+        return
+    job_id = f"workflow_schedule_{workflow_id}"
+    try:
+        _scheduler_ref.remove_job(job_id)
+    except Exception:
+        pass
+
+
+def _get_workflow_next_run_time(workflow_id: int) -> Optional[str]:
+    if _scheduler_ref is None:
+        return None
+
+    job_id = f"workflow_schedule_{workflow_id}"
+    try:
+        job = _scheduler_ref.get_job(job_id)
+        if job and job.next_run_time:
+            return job.next_run_time.isoformat(timespec="seconds")
+    except Exception:
+        pass
+    return None
+
+
+def _scheduled_workflow_run(workflow_id: int):
+    logger.info(f"Scheduled run triggered for workflow {workflow_id}")
+    try:
+        run_workflow(
+            workflow_id,
+            RunWorkflowRequest(
+                trigger_type="SCHEDULED",
+                initiated_by="scheduler",
+                allow_ddl_execute=False,
+            ),
+        )
+    except Exception as exc:
+        logger.error(f"Scheduled run failed for workflow {workflow_id}: {exc}")

@@ -91,3 +91,10 @@ class MySQLAdapter(BaseAdapter):
                 "rows": rows,
                 "row_count": len(rows),
             }
+
+    def execute_sql(self, sql: str) -> None:
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(sql)
+            conn.commit()
+            cur.close()

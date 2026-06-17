@@ -1,0 +1,530 @@
+.workflow-studio-page {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.workflow-studio-hero {
+    margin-bottom: 4px;
+}
+
+.workflow-studio-toolbar {
+    display: grid;
+    grid-template-columns: 220px 1fr auto auto;
+    gap: 10px;
+    align-items: end;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg-elevated);
+}
+
+.workflow-studio-toolbar-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.workflow-studio-toolbar-group.grow {
+    min-width: 260px;
+}
+
+.workflow-studio-toolbar-group label {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.workflow-studio-toolbar select,
+.workflow-studio-toolbar input {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-soft-2);
+    color: var(--text);
+    padding: 9px 11px;
+}
+
+.workflow-studio-layout {
+    display: grid;
+    grid-template-columns: 290px minmax(700px, 1fr);
+    gap: 12px;
+}
+
+.workflow-studio-palette {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg-elevated);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 760px;
+}
+
+.workflow-studio-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.workflow-studio-panel-header h3 {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.workflow-studio-panel-header span {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+}
+
+.workflow-studio-search {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-soft-2);
+    color: var(--text);
+    padding: 9px 11px;
+}
+
+.workflow-studio-pipeline-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow: auto;
+    max-height: 590px;
+}
+
+.workflow-studio-tree-level {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-soft-2) 88%, var(--bg-elevated));
+}
+
+.workflow-studio-tree-level + .workflow-studio-tree-level {
+    margin-top: 4px;
+}
+
+.workflow-studio-tree-level > summary {
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 9px;
+    cursor: pointer;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 0.74rem;
+    border-radius: 9px;
+    transition: background 120ms ease, color 120ms ease;
+}
+
+.workflow-studio-tree-level > summary::-webkit-details-marker {
+    display: none;
+}
+
+.workflow-studio-tree-level > summary::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-right: 1.8px solid color-mix(in srgb, var(--text-muted) 88%, transparent);
+    border-bottom: 1.8px solid color-mix(in srgb, var(--text-muted) 88%, transparent);
+    transform: rotate(-45deg);
+    transform-origin: center;
+    transition: transform 120ms ease, border-color 120ms ease;
+    margin-right: 2px;
+    flex: 0 0 auto;
+}
+
+.workflow-studio-tree-level[open] > summary::before {
+    transform: rotate(45deg);
+}
+
+.workflow-studio-tree-level > summary:hover {
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg-elevated));
+    color: color-mix(in srgb, var(--primary) 45%, var(--text));
+}
+
+.workflow-studio-tree-level > summary:hover::before {
+    border-color: color-mix(in srgb, var(--primary) 55%, var(--text-muted));
+}
+
+.workflow-studio-tree-level > summary small {
+    font-size: 0.7rem;
+    color: color-mix(in srgb, var(--primary) 55%, var(--text-muted));
+    border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+    border-radius: 999px;
+    padding: 1px 7px;
+}
+
+.workflow-studio-tree-schema {
+    margin: 0 8px 8px;
+    border-left: 2px solid color-mix(in srgb, var(--primary) 18%, var(--border));
+}
+
+.workflow-studio-tree-object {
+    margin: 0 8px 8px;
+    border-left: 2px solid color-mix(in srgb, var(--primary) 12%, var(--border));
+}
+
+.workflow-studio-tree-pipeline-items {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 8px 8px;
+}
+
+.workflow-studio-pipeline-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-soft-2) 85%, var(--bg-elevated));
+    padding: 9px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    cursor: grab;
+    user-select: none;
+    transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+.workflow-studio-pipeline-card:hover {
+    border-color: color-mix(in srgb, var(--primary) 42%, var(--border));
+    transform: translateY(-1px);
+    box-shadow: 0 5px 14px color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.workflow-studio-pipeline-card:active {
+    cursor: grabbing;
+}
+
+.workflow-studio-pipeline-card span,
+.workflow-studio-pipeline-card small {
+    color: var(--text-muted);
+}
+
+.workflow-studio-flow-chip {
+    align-self: flex-start;
+    margin-top: 2px;
+    padding: 1px 7px;
+    border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--border));
+    border-radius: 999px;
+    font-size: 0.68rem;
+    letter-spacing: 0.02em;
+    color: color-mix(in srgb, var(--primary) 58%, var(--text-muted));
+}
+
+.workflow-studio-hint {
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    background: var(--bg-soft-2);
+    color: var(--text-muted);
+    padding: 10px;
+    line-height: 1.5;
+    font-size: 0.84rem;
+}
+
+.workflow-studio-canvas-panel {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg-elevated);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 760px;
+}
+
+.workflow-studio-canvas-toolbar {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.workflow-studio-canvas-toolbar-left,
+.workflow-studio-canvas-toolbar-right {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.workflow-studio-canvas-toolbar input,
+.workflow-studio-canvas-toolbar select,
+.workflow-studio-inline-form input,
+.workflow-studio-inline-form select {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-soft-2);
+    color: var(--text);
+    padding: 8px 10px;
+}
+
+.workflow-studio-zoom-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-soft-2);
+    padding: 4px;
+}
+
+.workflow-studio-zoom-controls span {
+    min-width: 52px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.84rem;
+}
+
+.workflow-studio-inline-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 0.86rem;
+}
+
+.pipeline-secondary-btn.active {
+    border-color: var(--primary);
+    color: var(--primary);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
+.workflow-studio-canvas {
+    position: relative;
+    border: 1px dashed var(--border);
+    border-radius: 14px;
+    min-height: 460px;
+    background:
+        radial-gradient(circle at 8% 4%, color-mix(in srgb, var(--primary) 10%, transparent), transparent 30%),
+        radial-gradient(circle at 95% 0%, color-mix(in srgb, #26a7d9 9%, transparent), transparent 28%),
+        var(--bg-soft-2);
+    overflow: hidden;
+}
+
+.workflow-studio-canvas.drag-over {
+    border-color: var(--primary);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 35%, transparent);
+}
+
+.workflow-studio-graph-surface {
+    position: absolute;
+    inset: 0;
+    transform-origin: top left;
+}
+
+.workflow-studio-edges {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: auto;
+    z-index: 1;
+}
+
+.workflow-studio-edge-line {
+    stroke: color-mix(in srgb, var(--primary) 65%, var(--border));
+    stroke-width: 2;
+    cursor: pointer;
+}
+
+.workflow-studio-edge-line:hover {
+    stroke: color-mix(in srgb, #ef4444 70%, var(--primary));
+}
+
+.workflow-studio-edge-arrow {
+    fill: color-mix(in srgb, var(--primary) 70%, var(--border));
+}
+
+.workflow-studio-node {
+    position: absolute;
+    width: 224px;
+    min-height: 54px;
+    border: 1px solid color-mix(in srgb, var(--primary) 44%, var(--border));
+    border-radius: 11px;
+    background: var(--bg-elevated);
+    box-shadow: 0 9px 24px color-mix(in srgb, var(--primary) 15%, transparent);
+    padding: 10px 30px 10px 10px;
+    cursor: grab;
+    user-select: none;
+    z-index: 2;
+}
+
+.workflow-studio-node:active {
+    cursor: grabbing;
+}
+
+.workflow-studio-node.link-source {
+    border-color: color-mix(in srgb, #10b981 70%, var(--primary));
+    box-shadow: 0 0 0 2px color-mix(in srgb, #10b981 28%, transparent);
+}
+
+.workflow-studio-node-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.workflow-studio-node-subtitle {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.workflow-studio-node-remove {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 20px;
+    height: 20px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-soft-2);
+    color: var(--text-muted);
+    padding: 0;
+}
+
+.workflow-studio-empty-canvas {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    border: 1px dashed var(--border);
+    border-radius: 11px;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    padding: 12px 16px;
+    text-align: center;
+    width: min(420px, 86%);
+}
+
+.workflow-studio-footer-row {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr 1fr 0.95fr;
+    gap: 10px;
+}
+
+.workflow-studio-subpanel {
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--bg-soft-2) 90%, var(--bg-elevated));
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.workflow-studio-subpanel h4 {
+    margin: 0;
+    font-size: 0.92rem;
+}
+
+.workflow-studio-edge-list,
+.workflow-studio-run-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 150px;
+    overflow: auto;
+}
+
+.workflow-studio-edge-row,
+.workflow-studio-run-row {
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--bg-elevated);
+    padding: 7px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+
+.workflow-studio-run-row {
+    text-align: left;
+    flex-direction: row;
+}
+
+.workflow-studio-run-row span,
+.workflow-studio-run-row small,
+.workflow-studio-caption,
+.workflow-studio-run-summary {
+    color: var(--text-muted);
+    font-size: 0.82rem;
+}
+
+.workflow-studio-minimap {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    cursor: pointer;
+}
+
+.workflow-studio-minimap-edge {
+    stroke: color-mix(in srgb, var(--primary) 55%, var(--border));
+    stroke-width: 1;
+}
+
+.workflow-studio-minimap-node {
+    fill: color-mix(in srgb, var(--primary) 35%, var(--bg-soft-2));
+    stroke: color-mix(in srgb, var(--primary) 65%, var(--border));
+    stroke-width: 0.8;
+}
+
+.workflow-studio-minimap-viewport {
+    fill: color-mix(in srgb, var(--primary) 16%, transparent);
+    stroke: color-mix(in srgb, #f59e0b 80%, var(--primary));
+    stroke-width: 1;
+}
+
+.workflow-studio-inline-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+    align-items: center;
+}
+
+.workflow-studio-inline-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.workflow-studio-actions-row {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+@media (max-width: 1400px) {
+    .workflow-studio-layout {
+        grid-template-columns: 270px 1fr;
+    }
+
+    .workflow-studio-footer-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 1180px) {
+    .workflow-studio-toolbar {
+        grid-template-columns: 1fr;
+    }
+
+    .workflow-studio-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .workflow-studio-palette {
+        min-height: 280px;
+    }
+
+    .workflow-studio-pipeline-list {
+        max-height: 240px;
+    }
+
+    .workflow-studio-inline-form {
+        grid-template-columns: 1fr;
+    }
+}

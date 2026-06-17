@@ -1,0 +1,9 @@
+Phase ID,Phase Name,Start Date,End Date,Sprint Goal,Status,Velocity Target,Blockers,Actual Completed,Required Inputs
+P-01,Foundation Setup,2026-01-06,2026-02-14,Build base backend and frontend setup with local run support,Completed,40,None,42,None
+P-02,Core Platform MVP,2026-02-17,2026-04-30,Deliver auth connections explorer query lineage pipelines model development insights utilities and admin,Completed,85,None,88,Team feature feedback for next iteration
+P-03,Stabilization and Hardening,2026-05-01,2026-06-14,Improve reliability with connection consistency deploy parity and cross-module stability,Active,45,Intermittent backend startup failures in local runs | connection consistency regressions,18,Startup failure logs and priority bug list from team
+P-04,Quality Engineering and CI,2026-06-15,2026-07-19,Add backend frontend E2E and SQL safety tests with CI quality gates,Planned,50,No automated test baseline yet,0,Finalize test stack and CI policy
+P-05,Data Testing and Semantic Layer,2026-07-20,2026-08-30,Build reusable data quality checks semantic model manager and metrics catalog,Planned,55,Requires business KPI ownership and rule definitions,0,Provide KPI dictionary and data quality rules
+P-06,Reporting and BI Enhancements,2026-08-31,2026-09-27,Create report layer SQL generation AI report enhancement and BI export connectors,Planned,45,Depends on semantic layer completion,0,Share target BI tools and report templates
+P-07,Automation Operations and Governance,2026-09-28,2026-11-08,Add agentic pipeline authoring observability audit trail granular access and release controls,Planned,60,Tenancy and governance design pending,0,Security governance and approval workflow definition
+P-08,Contributor Enablement,2026-05-27,2026-06-05,Create role-based onboarding paths for backend frontend data QA and DevOps contributors,In Progress,20,Needs role-owner review and examples,6,Assign reviewer for each role track

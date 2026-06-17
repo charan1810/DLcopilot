@@ -14,6 +14,7 @@ import {
     fetchPipelineRun,
     fixSqlQuery,
     agenticGeneratePipelineSteps,
+    validatePipelineSteps,
     aiSuggestPipelineMapping,
     fetchSchemas,
     fetchObjects,
@@ -769,13 +770,67 @@ function normalizeIdentifierValue(value = "") {
     return String(value || "").trim().replace(/^"+|"+$/g, "");
 }
 
+function simplifyMappingDataType(value = "") {
+    const raw = String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!raw) {
+        return "text";
+    }
+
+    const varcharMatch = raw.match(/^character varying(?:\(([^)]+)\))?$/);
+    if (varcharMatch) {
+        return varcharMatch[1] ? `varchar(${varcharMatch[1]})` : "varchar";
+    }
+
+    if (/^varchar\b/.test(raw)) {
+        return raw;
+    }
+
+    if (raw === "timestamp without time zone") {
+        return "timestamp";
+    }
+
+    if (raw === "timestamp with time zone") {
+        return "timestamptz";
+    }
+
+    if (raw === "double precision") {
+        return "double";
+    }
+
+    if (raw === "integer") {
+        return "int";
+    }
+
+    if (raw === "bigint") {
+        return "bigint";
+    }
+
+    if (raw === "smallint") {
+        return "smallint";
+    }
+
+    if (raw === "boolean") {
+        return "bool";
+    }
+
+    return raw;
+}
+
 function normalizeMappingColumn(column = {}) {
+    // Support old single source_column and new source_columns array
+    const rawSources = Array.isArray(column.source_columns)
+        ? column.source_columns
+        : column.source_column
+        ? [column.source_column]
+        : [];
+    const sourceColumns = [...new Set(rawSources.map(normalizeIdentifierValue).filter(Boolean))];
     return {
-        source_column: normalizeIdentifierValue(column.source_column || ""),
+        source_columns: sourceColumns,
         target_column: normalizeIdentifierValue(column.target_column || ""),
-        data_type: String(column.data_type || "text").trim() || "text",
+        data_type: simplifyMappingDataType(column.data_type || "text"),
         is_nullable: column.is_nullable !== false,
         include: column.include !== false,
+        is_manual: column.is_manual === true,
     };
 }
 
@@ -789,7 +844,7 @@ function buildDefaultPipelineMapping(schemaName, selectedObject, targetObject) {
         target: {
             schema: normalizeIdentifierValue(parsedTarget.schema || ""),
             object: normalizeIdentifierValue(parsedTarget.object || ""),
-            mode: parsedTarget.object ? "existing" : "create_new",
+            mode: "existing",
         },
         columns: [],
     };
@@ -808,7 +863,7 @@ function normalizePipelineMappingConfig(mappingConfig, schemaName, sourceObject,
         target: {
             schema: normalizeIdentifierValue(target.schema || fallback.target.schema),
             object: normalizeIdentifierValue(target.object || fallback.target.object),
-            mode: target.mode === "create_new" ? "create_new" : "existing",
+            mode: "existing",
         },
         columns: Array.isArray(mappingConfig?.columns)
             ? mappingConfig.columns.map((column) => normalizeMappingColumn(column))
@@ -848,7 +903,7 @@ function buildMappingColumnsFromMetadata(sourceColumns = [], targetColumns = [])
         }
 
         return normalizeMappingColumn({
-            source_column: column.column_name,
+            source_columns: [column.column_name],
             target_column: targetMatch?.column_name || column.column_name,
             data_type: targetMatch?.data_type || column.data_type || "text",
             is_nullable: (targetMatch?.is_nullable || column.is_nullable) !== "NO",
@@ -863,7 +918,7 @@ function buildMappingColumnsFromMetadata(sourceColumns = [], targetColumns = [])
         }
 
         mappedColumns.push(normalizeMappingColumn({
-            source_column: "",
+            source_columns: [],
             target_column: column.column_name,
             data_type: column.data_type || "text",
             is_nullable: column.is_nullable !== "NO",
@@ -880,9 +935,9 @@ const MAPPING_CANVAS_VERTICAL_PADDING = 12;
 const MAPPING_CANVAS_CONNECTOR_WIDTH = 220;
 const MAPPING_MODAL_BOX_WIDTH = 320;
 const MAPPING_MODAL_BOX_HEADER_HEIGHT = 58;
-const MAPPING_MODAL_BOX_ROW_HEIGHT = 36;
+const MAPPING_MODAL_BOX_ROW_HEIGHT = 40;
 const MAPPING_MODAL_STAGE_WIDTH = 1380;
-const MAPPING_MODAL_TARGET_BOX_MAX_WIDTH = 560;
+const MAPPING_MODAL_TARGET_BOX_MAX_WIDTH = 760;
 
 function buildCanvasTargetColumns(mappingColumns = [], targetDetails = null) {
     if (Array.isArray(mappingColumns) && mappingColumns.length) {
@@ -891,7 +946,7 @@ function buildCanvasTargetColumns(mappingColumns = [], targetDetails = null) {
 
     if (Array.isArray(targetDetails?.columns) && targetDetails.columns.length) {
         return targetDetails.columns.map((column) => normalizeMappingColumn({
-            source_column: "",
+            source_columns: [],
             target_column: column.column_name,
             data_type: column.data_type || "text",
             is_nullable: column.is_nullable !== "NO",
@@ -907,7 +962,7 @@ function getMappingInputWidthCh(value = "", fallback = 12, ceiling = 28) {
     return Math.min(Math.max(contentLength + 2, fallback), ceiling);
 }
 
-function getMappingTargetBoxWidth(mappingColumns = []) {
+function getMappingTargetBoxWidth(mappingColumns = [], includeAdvancedControls = false) {
     const maxTargetCh = mappingColumns.reduce(
         (largest, column) => Math.max(largest, getMappingInputWidthCh(column.target_column, 14, 30)),
         14
@@ -916,7 +971,8 @@ function getMappingTargetBoxWidth(mappingColumns = []) {
         (largest, column) => Math.max(largest, getMappingInputWidthCh(column.data_type, 10, 18)),
         10
     );
-    const estimatedWidth = 164 + (maxTargetCh * 8) + (maxTypeCh * 7);
+    const baseWidth = includeAdvancedControls ? 460 : 280;
+    const estimatedWidth = baseWidth + (maxTargetCh * 8) + (maxTypeCh * 7);
     return Math.min(Math.max(estimatedWidth, MAPPING_MODAL_BOX_WIDTH), MAPPING_MODAL_TARGET_BOX_MAX_WIDTH);
 }
 
@@ -1136,6 +1192,7 @@ export default function PipelineBuilder({
     currentTransformationSource = null,
     pipelineSession,
     updatePipelineSession,
+    onSyncToGlobalContext,
 }) {
     const [pipelines, setPipelines] = useState(() => normalizePipelineSession(
         pipelineSession,
@@ -1176,6 +1233,7 @@ export default function PipelineBuilder({
     const [loadingList, setLoadingList] = useState(false);
     const [savingPipeline, setSavingPipeline] = useState(false);
     const [executing, setExecuting] = useState(false);
+    const [validatingPipelineSteps, setValidatingPipelineSteps] = useState(false);
     const [activeSubtab, setActiveSubtab] = useState("builder");
     const [message, setMessage] = useState(() => normalizePipelineSession(
         pipelineSession,
@@ -1207,6 +1265,9 @@ export default function PipelineBuilder({
         schemaName,
         selectedObject
     ).stepForm);
+    const [editingStepId, setEditingStepId] = useState(null);
+    const [editingStepForm, setEditingStepForm] = useState({ step_name: "", sql_text: "" });
+    const [savingStepEdit, setSavingStepEdit] = useState(false);
     const [starterConfig, setStarterConfig] = useState(() => normalizePipelineSession(
         pipelineSession,
         connectionId,
@@ -1220,6 +1281,82 @@ export default function PipelineBuilder({
     const canCreatePipeline = useMemo(() => {
         return !!pipelineForm.name?.trim() && !!pipelineForm.connection_id;
     }, [pipelineForm]);
+
+    const pageContext = useMemo(() => ({
+        databaseName: normalizeIdentifierValue(databaseName || ""),
+        schemaName: normalizeIdentifierValue(schemaName || ""),
+        objectName: normalizeIdentifierValue(selectedObject || ""),
+    }), [databaseName, schemaName, selectedObject]);
+
+    const pipelineContext = useMemo(() => {
+        const sourceRef = parseSchemaObject(pipelineForm.source_object || "");
+        const objectName = normalizeIdentifierValue(sourceRef.object || pipelineForm.source_object || "");
+        const schemaFromSource = normalizeIdentifierValue(sourceRef.schema || "");
+        return {
+            databaseName: normalizeIdentifierValue(pipelineForm.database_name || databaseName || ""),
+            schemaName: normalizeIdentifierValue(schemaFromSource || pipelineForm.schema_name || schemaName || ""),
+            objectName: objectName || normalizeIdentifierValue(selectedObject || ""),
+        };
+    }, [pipelineForm.source_object, pipelineForm.database_name, pipelineForm.schema_name, databaseName, schemaName, selectedObject]);
+
+    const contextMismatch = useMemo(() => {
+        const norm = (value) => String(value || "").trim().toLowerCase();
+        return norm(pageContext.databaseName) !== norm(pipelineContext.databaseName)
+            || norm(pageContext.schemaName) !== norm(pipelineContext.schemaName)
+            || norm(pageContext.objectName) !== norm(pipelineContext.objectName);
+    }, [pageContext, pipelineContext]);
+
+    const handleSyncContextToPage = useCallback(() => {
+        if (!onSyncToGlobalContext) return;
+        onSyncToGlobalContext({
+            databaseName: pipelineContext.databaseName,
+            schemaName: pipelineContext.schemaName,
+            objectName: pipelineContext.objectName,
+        });
+    }, [onSyncToGlobalContext, pipelineContext]);
+
+    const groupedSidebarPipelines = useMemo(() => {
+        const schemaMap = new Map();
+
+        pipelines.forEach((item) => {
+            const parsedSource = parseSchemaObject(item.source_object || "");
+            const schemaKey = normalizeIdentifierValue(parsedSource.schema || item.schema_name || schemaName || "unknown_schema") || "unknown_schema";
+            const objectKey = normalizeIdentifierValue(parsedSource.object || item.source_object || "*") || "*";
+
+            if (!schemaMap.has(schemaKey)) {
+                schemaMap.set(schemaKey, new Map());
+            }
+
+            const objectMap = schemaMap.get(schemaKey);
+            if (!objectMap.has(objectKey)) {
+                objectMap.set(objectKey, []);
+            }
+
+            objectMap.get(objectKey).push(item);
+        });
+
+        return Array.from(schemaMap.entries())
+            .map(([schema, objectMap]) => {
+                const objects = Array.from(objectMap.entries())
+                    .map(([objectName, items]) => ({
+                        objectName,
+                        items: items
+                            .slice()
+                            .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""))),
+                    }))
+                    .sort((a, b) => a.objectName.localeCompare(b.objectName));
+
+                const count = objects.reduce((sum, obj) => sum + obj.items.length, 0);
+                const hasSelected = objects.some((obj) => obj.items.some((pipeline) => pipeline.id === selectedPipelineId));
+                return {
+                    schema,
+                    objects,
+                    count,
+                    hasSelected,
+                };
+            })
+            .sort((a, b) => a.schema.localeCompare(b.schema));
+    }, [pipelines, schemaName, selectedPipelineId]);
 
     const starterDraft = useMemo(() => buildSchemaStarterDraft({
         connectionId,
@@ -1256,6 +1393,8 @@ export default function PipelineBuilder({
         setError(next.error);
         setPipelineForm(next.pipelineForm);
         setStepForm(next.stepForm);
+        setEditingStepId(null);
+        setEditingStepForm({ step_name: "", sql_text: "" });
         setStarterConfig(next.starterConfig);
     }, [sessionKey]);
 
@@ -1393,6 +1532,32 @@ export default function PipelineBuilder({
     }, [connectionId, databaseName, pipelineForm.connection_id, pipelineForm.database_name, targetSchemaForPicker]);
 
     useEffect(() => {
+        let cancelled = false;
+        const activeConnectionId = Number(pipelineForm.connection_id || connectionId || 0);
+        const activeDatabaseName = pipelineForm.database_name || databaseName || "";
+        const activeSchema = pipelineForm.schema_name || schemaName || "";
+
+        if (!activeConnectionId || !activeDatabaseName || !activeSchema) {
+            setSourceSchemaObjects([]);
+            return undefined;
+        }
+
+        async function loadSourceObjects() {
+            try {
+                const result = await fetchObjects(activeConnectionId, activeDatabaseName, activeSchema);
+                if (!cancelled) {
+                    setSourceSchemaObjects(Array.isArray(result.objects) ? result.objects : []);
+                }
+            } catch {
+                if (!cancelled) setSourceSchemaObjects([]);
+            }
+        }
+
+        loadSourceObjects();
+        return () => { cancelled = true; };
+    }, [connectionId, databaseName, schemaName, pipelineForm.connection_id, pipelineForm.database_name, pipelineForm.schema_name]);
+
+    useEffect(() => {
         if (!updatePipelineSession) return;
 
         updatePipelineSession({
@@ -1452,6 +1617,8 @@ export default function PipelineBuilder({
             const data = await getPipeline(pipelineId);
             setSelectedPipeline(data);
             setSelectedPipelineId(data.id);
+            setEditingStepId(null);
+            setEditingStepForm({ step_name: "", sql_text: "" });
 
             setPipelineForm({
                 name: data.name || "",
@@ -1484,6 +1651,8 @@ export default function PipelineBuilder({
         setRuns([]);
         setPipelineForm(buildDefaultPipelineForm(connectionId, databaseName, schemaName, selectedObject));
         setStepForm(buildDefaultStepForm());
+        setEditingStepId(null);
+        setEditingStepForm({ step_name: "", sql_text: "" });
         setMessage("");
         setError("");
     }
@@ -1738,9 +1907,56 @@ export default function PipelineBuilder({
 
             const updated = await removePipelineStep(selectedPipelineId, stepId);
             setSelectedPipeline(updated);
+            if (editingStepId === stepId) {
+                setEditingStepId(null);
+                setEditingStepForm({ step_name: "", sql_text: "" });
+            }
             setMessage("Step deleted successfully.");
         } catch (err) {
             setError(err.message || "Failed to delete step");
+        }
+    }
+
+    function handleStartEditStep(step) {
+        setEditingStepId(step.id);
+        setEditingStepForm({
+            step_name: step.step_name || "",
+            sql_text: step.sql_text || "",
+        });
+        setError("");
+        setMessage("");
+    }
+
+    function handleCancelEditStep() {
+        setEditingStepId(null);
+        setEditingStepForm({ step_name: "", sql_text: "" });
+    }
+
+    async function handleSaveStepEdit(stepId) {
+        if (!selectedPipelineId) return;
+
+        if (!editingStepForm.step_name.trim() || !editingStepForm.sql_text.trim()) {
+            setError("Step name and SQL are required.");
+            return;
+        }
+
+        try {
+            setSavingStepEdit(true);
+            setError("");
+            setMessage("");
+
+            const updated = await updatePipelineStep(selectedPipelineId, stepId, {
+                step_name: editingStepForm.step_name,
+                sql_text: editingStepForm.sql_text,
+            });
+            setSelectedPipeline(updated);
+            setEditingStepId(null);
+            setEditingStepForm({ step_name: "", sql_text: "" });
+            setMessage("Pipeline step updated.");
+        } catch (err) {
+            setError(err.message || "Failed to update step");
+        } finally {
+            setSavingStepEdit(false);
         }
     }
 
@@ -1838,6 +2054,41 @@ export default function PipelineBuilder({
         }
     }
 
+    async function handleValidatePipelineSteps() {
+        if (!selectedPipelineId) {
+            setError("Please select a pipeline first.");
+            return;
+        }
+
+        try {
+            setValidatingPipelineSteps(true);
+            setError("");
+            setMessage("");
+
+            const result = await validatePipelineSteps(selectedPipelineId, {
+                stop_on_error: false,
+                timeout_ms: 5000,
+            });
+
+            const failed = (result.steps || []).filter((step) => !step.valid);
+            if (!failed.length) {
+                setMessage(`Validation passed. ${result.validated_steps}/${result.total_steps} step(s) are valid.`);
+                return;
+            }
+
+            const preview = failed
+                .slice(0, 3)
+                .map((step) => `Step ${step.step_order}: ${step.error || "Validation failed"}`)
+                .join(" | ");
+            const extra = failed.length > 3 ? ` | +${failed.length - 3} more` : "";
+            setError(`Validation found ${failed.length} issue(s). ${preview}${extra}`);
+        } catch (err) {
+            setError(err.message || "Failed to validate pipeline steps");
+        } finally {
+            setValidatingPipelineSteps(false);
+        }
+    }
+
     async function handleOpenRun(runId) {
         try {
             setError("");
@@ -1913,12 +2164,16 @@ export default function PipelineBuilder({
     const [agentGenerating, setAgentGenerating] = useState(false);
     const [agentResult, setAgentResult] = useState(null);
     const [agentError, setAgentError] = useState("");
+    const [agentStepDrafts, setAgentStepDrafts] = useState({});
     const [agentExpandedSteps, setAgentExpandedSteps] = useState({});
     const [agentAddingAll, setAgentAddingAll] = useState(false);
     const [agentAddedSteps, setAgentAddedSteps] = useState(new Set());
+    const [agentValidatingAll, setAgentValidatingAll] = useState(false);
+    const [agentValidationSummary, setAgentValidationSummary] = useState(null);
     const [selectedStepTemplateId, setSelectedStepTemplateId] = useState("dedup");
     const [mappingSourceDetails, setMappingSourceDetails] = useState(null);
     const [mappingTargetDetails, setMappingTargetDetails] = useState(null);
+    const [additionalSourcesDetails, setAdditionalSourcesDetails] = useState([]);
     const [mappingMetadataLoading, setMappingMetadataLoading] = useState(false);
     const [mappingMetadataError, setMappingMetadataError] = useState("");
     const [selectedMappingSource, setSelectedMappingSource] = useState("");
@@ -1927,7 +2182,10 @@ export default function PipelineBuilder({
     const [targetObjectOptions, setTargetObjectOptions] = useState([]);
     const [targetPickerLoading, setTargetPickerLoading] = useState(false);
     const [targetPickerError, setTargetPickerError] = useState("");
+    const [additionalSources, setAdditionalSources] = useState([]);
+    const [sourceSchemaObjects, setSourceSchemaObjects] = useState([]);
     const [showMappingCanvas, setShowMappingCanvas] = useState(false);
+    const [showMappingAdvancedControls, setShowMappingAdvancedControls] = useState(false);
     const [mappingCanvasTf, setMappingCanvasTf] = useState({ x: 0, y: 0, scale: 1 });
     const [mappingBoxPositions, setMappingBoxPositions] = useState({
         source: { x: 120, y: 120 },
@@ -1996,8 +2254,19 @@ export default function PipelineBuilder({
     }, [selectedStepTemplateId]);
 
     const mappingSourceColumns = useMemo(() => {
-        return Array.isArray(mappingSourceDetails?.columns) ? mappingSourceDetails.columns : [];
-    }, [mappingSourceDetails]);
+        const primary = Array.isArray(mappingSourceDetails?.columns)
+            ? mappingSourceDetails.columns.map((col) => ({ ...col, _table: normalizedMappingConfig.source.object || "source" }))
+            : [];
+        const extra = additionalSourcesDetails.flatMap(({ name, columns }) =>
+            columns.map((col) => ({
+                ...col,
+                column_name: `${name}.${col.column_name}`,
+                _table: name,
+                _is_additional: true,
+            }))
+        );
+        return [...primary, ...extra];
+    }, [mappingSourceDetails, additionalSourcesDetails, normalizedMappingConfig.source.object]);
 
     const mappingCanvasTargets = useMemo(() => {
         return buildCanvasTargetColumns(normalizedMappingConfig.columns, mappingTargetDetails);
@@ -2006,11 +2275,12 @@ export default function PipelineBuilder({
     const mappingSourceUsage = useMemo(() => {
         const counts = new Map();
         mappingCanvasTargets.forEach((column) => {
-            if (!column.include || !column.source_column) {
-                return;
-            }
-            const key = String(column.source_column).toLowerCase();
-            counts.set(key, (counts.get(key) || 0) + 1);
+            if (!column.include) return;
+            (column.source_columns || []).forEach((src) => {
+                if (!src) return;
+                const key = src.toLowerCase();
+                counts.set(key, (counts.get(key) || 0) + 1);
+            });
         });
         return counts;
     }, [mappingCanvasTargets]);
@@ -2028,8 +2298,8 @@ export default function PipelineBuilder({
     }, [mappingCanvasTargets.length]);
 
     const mappingTargetBoxWidth = useMemo(() => {
-        return getMappingTargetBoxWidth(mappingCanvasTargets);
-    }, [mappingCanvasTargets]);
+        return getMappingTargetBoxWidth(mappingCanvasTargets, showMappingAdvancedControls);
+    }, [mappingCanvasTargets, showMappingAdvancedControls]);
 
     const mappingModalStageHeight = useMemo(() => {
         return Math.max(mappingSourceBoxHeight, mappingTargetBoxHeight) + 320;
@@ -2040,22 +2310,22 @@ export default function PipelineBuilder({
             mappingSourceColumns.map((column, index) => [String(column.column_name || "").toLowerCase(), index])
         );
 
-        return mappingCanvasTargets
-            .map((column, targetIndex) => {
-                const sourceKey = String(column.source_column || "").toLowerCase();
-                if (!column.include || !sourceKey || !sourceIndexByName.has(sourceKey)) {
-                    return null;
-                }
-
+        const result = [];
+        mappingCanvasTargets.forEach((column, targetIndex) => {
+            if (!column.include) return;
+            (column.source_columns || []).forEach((src) => {
+                const sourceKey = String(src || "").toLowerCase();
+                if (!sourceKey || !sourceIndexByName.has(sourceKey)) return;
                 const sourceIndex = sourceIndexByName.get(sourceKey);
-                return {
+                result.push({
                     sourceIndex,
                     targetIndex,
-                    sourceColumn: column.source_column,
+                    sourceColumn: src,
                     targetColumn: column.target_column,
-                };
-            })
-            .filter(Boolean);
+                });
+            });
+        });
+        return result;
     }, [mappingCanvasTargets, mappingSourceColumns]);
 
     const mappingModalConnections = useMemo(() => {
@@ -2281,19 +2551,31 @@ export default function PipelineBuilder({
                     })
                     : Promise.resolve(null);
 
-                const [sourceDetails, targetDetails] = await Promise.all([sourcePromise, targetPromise]);
+                const additionalPromises = additionalSources.map((tbl) =>
+                    fetchObjectDetails(activeConnectionId, pipelineForm.database_name, sourceSchema, tbl)
+                        .then((d) => ({ name: tbl, columns: Array.isArray(d?.columns) ? d.columns : [] }))
+                        .catch(() => ({ name: tbl, columns: [] }))
+                );
+
+                const [sourceDetails, targetDetails, ...additionalResults] = await Promise.all([
+                    sourcePromise,
+                    targetPromise,
+                    ...additionalPromises,
+                ]);
                 if (cancelled) {
                     return;
                 }
 
                 setMappingSourceDetails(sourceDetails || null);
                 setMappingTargetDetails(targetDetails || null);
+                setAdditionalSourcesDetails(additionalResults);
             } catch (err) {
                 if (cancelled) {
                     return;
                 }
                 setMappingSourceDetails(null);
                 setMappingTargetDetails(null);
+                setAdditionalSourcesDetails([]);
                 setMappingMetadataError(err.message || "Failed to load mapping metadata.");
             } finally {
                 if (!cancelled) {
@@ -2309,6 +2591,7 @@ export default function PipelineBuilder({
         };
     }, [
         connectionId,
+        additionalSources,
         normalizedMappingConfig.source.object,
         normalizedMappingConfig.source.schema,
         normalizedMappingConfig.target.object,
@@ -2336,7 +2619,7 @@ export default function PipelineBuilder({
                 ...syncMappingConfigWithHeader(prev.mapping_config, prev.schema_name, prev.source_object, prev.target_object),
                 target: {
                     ...syncMappingConfigWithHeader(prev.mapping_config, prev.schema_name, prev.source_object, prev.target_object).target,
-                    mode: mappingTargetDetails ? "existing" : "create_new",
+                    mode: "existing",
                 },
                 columns: mappedColumns,
             },
@@ -2429,16 +2712,16 @@ export default function PipelineBuilder({
                     ...nextMapping,
                     target: {
                         ...nextMapping.target,
-                        mode: "create_new",
                     },
                     columns: [
                         ...nextMapping.columns,
                         normalizeMappingColumn({
-                            source_column: "",
+                            source_columns: [],
                             target_column: "",
                             data_type: "text",
                             is_nullable: true,
                             include: true,
+                            is_manual: true,
                         }),
                     ],
                 },
@@ -2461,7 +2744,12 @@ export default function PipelineBuilder({
     }, [commitCanvasTargets]);
 
     const handleRemoveMappingColumn = useCallback((index) => {
-        commitCanvasTargets((columns) => columns.filter((_, columnIndex) => columnIndex !== index));
+        commitCanvasTargets((columns) => {
+            if (!columns[index]?.is_manual) {
+                return columns;
+            }
+            return columns.filter((_, columnIndex) => columnIndex !== index);
+        });
     }, [commitCanvasTargets]);
 
     const handleCanvasTargetMap = useCallback((targetIndex) => {
@@ -2470,17 +2758,42 @@ export default function PipelineBuilder({
             return;
         }
 
-        handleMappingColumnChange(targetIndex, "source_column", selectedMappingSource);
+        const srcLower = selectedMappingSource.toLowerCase();
+        commitCanvasTargets((columns) =>
+            columns.map((column, i) => {
+                if (i !== targetIndex) return column;
+                const existing = column.source_columns || [];
+                if (existing.some((s) => s.toLowerCase() === srcLower)) {
+                    return column; // already mapped, no-op
+                }
+                return normalizeMappingColumn({
+                    ...column,
+                    source_columns: [...existing, selectedMappingSource],
+                });
+            })
+        );
         setSelectedMappingSource("");
         setError("");
         setMessage(`Mapped ${selectedMappingSource} to ${mappingCanvasTargets[targetIndex]?.target_column || "target column"}.`);
-    }, [handleMappingColumnChange, mappingCanvasTargets, selectedMappingSource]);
+    }, [commitCanvasTargets, mappingCanvasTargets, selectedMappingSource]);
 
-    const handleClearTargetMapping = useCallback((targetIndex) => {
-        handleMappingColumnChange(targetIndex, "source_column", "");
+    const handleClearTargetMapping = useCallback((targetIndex, sourceColumn = null) => {
+        commitCanvasTargets((columns) =>
+            columns.map((column, i) => {
+                if (i !== targetIndex) return column;
+                if (sourceColumn === null) {
+                    return normalizeMappingColumn({ ...column, source_columns: [] });
+                }
+                const srcLower = sourceColumn.toLowerCase();
+                return normalizeMappingColumn({
+                    ...column,
+                    source_columns: (column.source_columns || []).filter((s) => s.toLowerCase() !== srcLower),
+                });
+            })
+        );
         setError("");
         setMessage("Removed the source-to-target link.");
-    }, [handleMappingColumnChange]);
+    }, [commitCanvasTargets]);
 
     const updateTargetSelection = useCallback(({ schema, object, mode, clearColumns = false }) => {
         setPipelineForm((prev) => {
@@ -2537,7 +2850,7 @@ export default function PipelineBuilder({
         updateTargetSelection({
             schema: selectedTargetReference.schema,
             object: nextObject,
-            mode: "create_new",
+            mode: "existing",
         });
         setError("");
     }, [selectedTargetReference.schema, updateTargetSelection]);
@@ -2620,6 +2933,7 @@ export default function PipelineBuilder({
         setAgentGenerating(true);
         setAgentError("");
         setAgentResult(null);
+        setAgentStepDrafts({});
         setAgentAddedSteps(new Set());
         setAgentExpandedSteps({});
 
@@ -2627,7 +2941,7 @@ export default function PipelineBuilder({
             let result = await agenticGeneratePipelineSteps(
                 selectedPipelineId,
                 agentRequirement.trim(),
-                [],
+                additionalSources,
                 { allowCreateTarget: false }
             );
 
@@ -2645,7 +2959,7 @@ export default function PipelineBuilder({
                 result = await agenticGeneratePipelineSteps(
                     selectedPipelineId,
                     agentRequirement.trim(),
-                    [],
+                    additionalSources,
                     { allowCreateTarget: true }
                 );
             }
@@ -2658,22 +2972,127 @@ export default function PipelineBuilder({
         }
     }, [selectedPipelineId, hasUnsavedPipelineDefinition, agentRequirement, selectedTargetReference.object, selectedTargetReference.schema]);
 
+    const handleAgentStepDraftChange = useCallback((idx, field, value, fallbackStep) => {
+        setAgentStepDrafts((prev) => {
+            const currentDraft = prev[idx] || {
+                step_name: fallbackStep?.step_name || "",
+                sql_text: fallbackStep?.sql_text || "",
+            };
+
+            return {
+                ...prev,
+                [idx]: {
+                    ...currentDraft,
+                    [field]: value,
+                },
+            };
+        });
+    }, []);
+
+    const handleRollbackAgentStep = useCallback((idx) => {
+        setAgentStepDrafts((prev) => {
+            if (!(idx in prev)) {
+                return prev;
+            }
+            const next = { ...prev };
+            delete next[idx];
+            return next;
+        });
+    }, []);
+
+    const handleValidateAllAgentSteps = useCallback(async () => {
+        if (!selectedPipelineId || !agentResult?.steps?.length) {
+            return;
+        }
+
+        try {
+            setAgentValidatingAll(true);
+            setError("");
+            setMessage("");
+
+            const stepsPayload = agentResult.steps.map((step, idx) => {
+                const draft = agentStepDrafts[idx] || step;
+                return {
+                    step_name: draft.step_name,
+                    step_type: "sql",
+                    sql_text: draft.sql_text,
+                    is_active: true,
+                };
+            });
+
+            const result = await validatePipelineSteps(selectedPipelineId, {
+                steps: stepsPayload,
+                stop_on_error: false,
+                timeout_ms: 5000,
+            });
+
+            const statusByOrder = new Map((result.steps || []).map((entry) => [entry.step_order, entry]));
+            const validatedSteps = (result.steps || []).filter((entry) => entry.valid).length;
+
+            setAgentValidationSummary({
+                valid: !!result.valid,
+                validatedSteps,
+                totalSteps: result.total_steps || agentResult.steps.length,
+            });
+
+            setAgentResult((prev) => {
+                if (!prev?.steps?.length) {
+                    return prev;
+                }
+
+                return {
+                    ...prev,
+                    validated_steps: validatedSteps,
+                    steps: prev.steps.map((step, idx) => {
+                        const row = statusByOrder.get(idx + 1);
+                        if (!row) {
+                            return step;
+                        }
+
+                        return {
+                            ...step,
+                            validated: !!row.valid,
+                            validation_error: row.error || "",
+                        };
+                    }),
+                };
+            });
+
+            if (result.valid) {
+                setMessage("All generated steps validated successfully.");
+            } else {
+                setError("Validation completed with issues. Review step-level errors before adding steps.");
+            }
+        } catch (err) {
+            setError(err.message || "Failed to validate generated steps.");
+        } finally {
+            setAgentValidatingAll(false);
+        }
+    }, [agentResult, agentStepDrafts, selectedPipelineId]);
+
     const handleAgentAddStep = useCallback(async (step, idx) => {
         if (!selectedPipelineId) return;
+        const stepDraft = agentStepDrafts[idx] || step;
+
+        if (!stepDraft.step_name?.trim() || !stepDraft.sql_text?.trim()) {
+            setError("Step name and SQL are required before adding this step.");
+            return;
+        }
+
         try {
             const updated = await addPipelineStep(selectedPipelineId, {
-                step_name: step.step_name,
-                sql_text: step.sql_text,
+                step_name: stepDraft.step_name,
+                sql_text: stepDraft.sql_text,
                 step_type: "sql",
                 is_active: true,
             });
             setSelectedPipeline(updated);
             setAgentAddedSteps((prev) => new Set(prev).add(idx));
-            setMessage(`Step "${step.step_name}" added to pipeline.`);
+            setMessage(`Step "${stepDraft.step_name}" added to pipeline.`);
         } catch (err) {
             setError(err.message || "Failed to add step");
         }
-    }, [selectedPipelineId]);
+    }, [agentStepDrafts, selectedPipelineId]);
 
     const handleAgentAddAllSteps = useCallback(async () => {
         if (!selectedPipelineId || !agentResult?.steps?.length) return;
@@ -2685,7 +3104,11 @@ export default function PipelineBuilder({
         let addedCount = 0;
         for (let i = 0; i < agentResult.steps.length; i++) {
             if (newAdded.has(i)) continue;
-            const step = agentResult.steps[i];
+            const step = agentStepDrafts[i] || agentResult.steps[i];
+            if (!step?.step_name?.trim() || !step?.sql_text?.trim()) {
+                setError(`Step ${i + 1} has an empty name or SQL. Fix it before adding all steps.`);
+                break;
+            }
             try {
                 lastPipeline = await addPipelineStep(selectedPipelineId, {
                     step_name: step.step_name,
@@ -2706,7 +3129,7 @@ export default function PipelineBuilder({
         if (addedCount > 0) {
             setMessage(`Added ${addedCount} AI-generated step(s) to pipeline.`);
         }
-    }, [selectedPipelineId, agentResult, agentAddedSteps, selectedPipeline]);
+    }, [selectedPipelineId, agentResult, agentAddedSteps, selectedPipeline, agentStepDrafts]);
 
     return (
         <div className="pipeline-builder-shell">
@@ -2719,19 +3142,32 @@ export default function PipelineBuilder({
                         </button>
                     </div>
 
-                    <div className="pipeline-context-box">
+                    <div className="pipeline-context-box compact">
                         <div className="pipeline-context-item">
-                            <span>Connection:</span>{connectionId || "-"}
+                            <span>Page context:</span>
+                            {pageContext.databaseName || "-"} / {pageContext.schemaName || "-"} / {pageContext.objectName || "-"}
                         </div>
                         <div className="pipeline-context-item">
-                            <span>Database:</span>{databaseName || "-"}
+                            <span>Pipeline context:</span>
+                            {pipelineContext.databaseName || "-"} / {pipelineContext.schemaName || "-"} / {pipelineContext.objectName || "-"}
                         </div>
-                        <div className="pipeline-context-item">
-                            <span>Schema:</span>{schemaName || "-"}
-                        </div>
-                        <div className="pipeline-context-item">
-                            <span>Object:</span>{selectedObject || "-"}
-                        </div>
+
+                        {contextMismatch ? (
+                            <div className="pipeline-context-mismatch">
+                                <div className="pipeline-context-mismatch-text">
+                                    Pipeline uses a different source context than the top Object Selection.
+                                </div>
+                                <button
+                                    className="pipeline-secondary-btn pipeline-context-sync-btn"
+                                    type="button"
+                                    onClick={handleSyncContextToPage}
+                                >
+                                    Sync Top Selection
+                                </button>
+                            </div>
+                        ) : null}
+
+                        <div className="pipeline-context-note">Top Object Selection is the primary context for ETL tabs.</div>
                     </div>
 
                     <div className="pipeline-list-scroll">
@@ -2740,18 +3176,50 @@ export default function PipelineBuilder({
                         ) : pipelines.length === 0 ? (
                             <div className="pipeline-empty">No pipelines found.</div>
                         ) : (
-                            pipelines.map((item) => (
-                                <button
-                                    key={item.id}
-                                    type="button"
-                                    className={`pipeline-list-item ${selectedPipelineId === item.id ? "active" : ""}`}
-                                    onClick={() => loadPipelineDetails(item.id)}
+                            groupedSidebarPipelines.map((schemaGroup) => (
+                                <details
+                                    key={schemaGroup.schema}
+                                    className="pipeline-tree-level pipeline-tree-schema"
+                                    open={schemaGroup.hasSelected || undefined}
                                 >
-                                    <div className="pipeline-list-name">{item.name}</div>
-                                    <div className="pipeline-list-meta">
-                                        {item.schema_name || "-"} / {item.source_object || "-"}
-                                    </div>
-                                </button>
+                                    <summary>
+                                        <span>{schemaGroup.schema}</span>
+                                        <small>{schemaGroup.count}</small>
+                                    </summary>
+
+                                    {schemaGroup.objects.map((objectGroup) => {
+                                        const objectHasSelected = objectGroup.items.some((pipeline) => pipeline.id === selectedPipelineId);
+
+                                        return (
+                                            <details
+                                                key={`${schemaGroup.schema}-${objectGroup.objectName}`}
+                                                className="pipeline-tree-level pipeline-tree-object"
+                                                open={objectHasSelected || undefined}
+                                            >
+                                                <summary>
+                                                    <span>{objectGroup.objectName}</span>
+                                                    <small>{objectGroup.items.length}</small>
+                                                </summary>
+
+                                                <div className="pipeline-tree-items">
+                                                    {objectGroup.items.map((item) => (
+                                                        <button
+                                                            key={item.id}
+                                                            type="button"
+                                                            className={`pipeline-list-item ${selectedPipelineId === item.id ? "active" : ""}`}
+                                                            onClick={() => loadPipelineDetails(item.id)}
+                                                        >
+                                                            <div className="pipeline-list-name">{item.name}</div>
+                                                            <div className="pipeline-list-meta">
+                                                                {item.schema_name || "-"} / {item.source_object || "-"}
+                                                            </div>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </details>
+                                        );
+                                    })}
+                                </details>
                             ))
                         )}
                     </div>
@@ -2847,14 +3315,15 @@ export default function PipelineBuilder({
                                     </div>
 
                                     <div className="form-field">
-                                        <label>Target Object (schema.object allowed)</label>
+                                        <label>Target Object</label>
                                         <input
                                             type="text"
                                             value={pipelineForm.target_object}
-                                            onChange={(e) =>
-                                                setPipelineForm((prev) => ({ ...prev, target_object: e.target.value }))
-                                            }
-                                            placeholder="e.g. CORE.customers_clean"
+                                            readOnly
+                                            disabled
+                                            placeholder="Select via the mapping picker below"
+                                            title="Controlled by the Target Schema + Object picker in Source to Target Mapping"
+                                            style={{ opacity: 0.7, cursor: "not-allowed" }}
                                         />
                                     </div>
 
@@ -2883,15 +3352,57 @@ export default function PipelineBuilder({
                                     </div>
 
                                     <div className="form-field">
-                                        <label>Source Object</label>
+                                        <label>Source Object (Primary)</label>
                                         <input
                                             type="text"
                                             value={pipelineForm.source_object}
                                             onChange={(e) =>
                                                 setPipelineForm((prev) => ({ ...prev, source_object: e.target.value }))
                                             }
-                                            placeholder="e.g. customers_src"
+                                            placeholder="e.g. order_items"
                                         />
+                                    </div>
+
+                                    <div className="form-field form-field-full">
+                                        <label>Additional Source Tables <span className="pipeline-mini-muted" style={{ fontWeight: 400 }}>(joined in SQL steps — passed to AI)</span></label>
+                                        <div style={{ display: "flex", gap: "8px", alignItems: "center", marginBottom: "6px" }}>
+                                            <select
+                                                defaultValue=""
+                                                onChange={(e) => {
+                                                    const val = e.target.value;
+                                                    if (val && !additionalSources.includes(val)) {
+                                                        setAdditionalSources((prev) => [...prev, val]);
+                                                    }
+                                                    e.target.value = "";
+                                                }}
+                                                style={{ flex: 1 }}
+                                            >
+                                                <option value="">Add a source table…</option>
+                                                {sourceSchemaObjects
+                                                    .filter((o) => !additionalSources.includes(o.name) && o.name !== pipelineForm.source_object)
+                                                    .map((o) => (
+                                                        <option key={o.name} value={o.name}>{o.name}{o.type ? ` (${o.type})` : ""}</option>
+                                                    ))}
+                                            </select>
+                                            {additionalSources.length > 0 && (
+                                                <button type="button" className="secondary-btn" style={{ whiteSpace: "nowrap" }} onClick={() => setAdditionalSources([])}>
+                                                    Clear all
+                                                </button>
+                                            )}
+                                        </div>
+                                        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                                            {additionalSources.map((src) => (
+                                                <span key={src} className="pipeline-chip-btn active" style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                                                    {src}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setAdditionalSources((prev) => prev.filter((s) => s !== src))}
+                                                        style={{ background: "none", border: "none", cursor: "pointer", padding: "0 2px", lineHeight: 1, fontSize: "12px" }}
+                                                        title={`Remove ${src}`}
+                                                    >×</button>
+                                                </span>
+                                            ))}
+                                        </div>
                                     </div>
 
                                     <div className="form-field">
@@ -2966,29 +3477,7 @@ export default function PipelineBuilder({
                                     </div>
                                 </div>
 
-                                <div className="pipeline-mapping-mode-row">
-                                    <button
-                                        type="button"
-                                        className={`pipeline-chip-btn ${normalizedMappingConfig.target.mode === "existing" ? "active" : ""}`}
-                                        onClick={() => handleMappingTargetModeChange("existing")}
-                                    >
-                                        Use Existing Target
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className={`pipeline-chip-btn ${normalizedMappingConfig.target.mode === "create_new" ? "active" : ""}`}
-                                        onClick={() => handleMappingTargetModeChange("create_new")}
-                                    >
-                                        Create Target From Mapping
-                                    </button>
-                                    <span className="pipeline-mini-muted">
-                                        {mappingTargetDetails
-                                            ? "The target object already exists. You can still switch to a new target draft if you want to redesign it first."
-                                            : normalizedMappingConfig.target.object
-                                                ? "The target object does not exist yet. Save this mapping, then Agentic AI will ask for permission before generating CREATE TABLE steps."
-                                                : "Set a target object in the pipeline header to anchor the mapping."}
-                                    </span>
-                                </div>
+
 
                                 <div className="pipeline-mapping-target-picker-grid">
                                     <div className="form-field">
@@ -3004,40 +3493,27 @@ export default function PipelineBuilder({
                                         </select>
                                     </div>
 
-                                    {normalizedMappingConfig.target.mode === "existing" ? (
-                                        <div className="form-field">
-                                            <label>Existing Target Object</label>
-                                            <select
-                                                value={selectedTargetReference.object}
-                                                onChange={(e) => handleExistingTargetSelect(e.target.value)}
-                                                disabled={!selectedTargetReference.schema || targetPickerLoading}
-                                            >
-                                                <option value="">
-                                                    {!selectedTargetReference.schema
-                                                        ? "Choose target schema first"
-                                                        : targetPickerLoading
-                                                            ? "Loading target objects..."
-                                                            : "Select target object"}
+                                    <div className="form-field">
+                                        <label>Target Object</label>
+                                        <select
+                                            value={selectedTargetReference.object}
+                                            onChange={(e) => handleExistingTargetSelect(e.target.value)}
+                                            disabled={!selectedTargetReference.schema || targetPickerLoading}
+                                        >
+                                            <option value="">
+                                                {!selectedTargetReference.schema
+                                                    ? "Choose target schema first"
+                                                    : targetPickerLoading
+                                                        ? "Loading objects..."
+                                                        : "Select target object"}
+                                            </option>
+                                            {targetObjectOptions.map((objectOption) => (
+                                                <option key={`${objectOption.schema || selectedTargetReference.schema}.${objectOption.name}`} value={objectOption.name}>
+                                                    {objectOption.name}{objectOption.type ? ` (${objectOption.type})` : ""}
                                                 </option>
-                                                {targetObjectOptions.map((objectOption) => (
-                                                    <option key={`${objectOption.schema || selectedTargetReference.schema}.${objectOption.name}`} value={objectOption.name}>
-                                                        {objectOption.name}{objectOption.type ? ` (${objectOption.type})` : ""}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                    ) : (
-                                        <div className="form-field">
-                                            <label>New Target Object</label>
-                                            <input
-                                                type="text"
-                                                value={selectedTargetReference.object}
-                                                onChange={(e) => handleCreateTargetNameChange(e.target.value)}
-                                                placeholder={selectedTargetReference.schema ? "e.g. customer_s" : "Choose target schema first"}
-                                                disabled={!selectedTargetReference.schema}
-                                            />
-                                        </div>
-                                    )}
+                                            ))}
+                                        </select>
+                                    </div>
                                 </div>
 
                                 {targetPickerError ? (
@@ -3160,6 +3636,13 @@ export default function PipelineBuilder({
                                                 {mappingMetadataLoading ? "Loading metadata..." : "Prepare Target Nodes"}
                                             </button>
                                             <button className="pipeline-secondary-btn" type="button" onClick={handleAddManualMappingColumn}>Add Target Column</button>
+                                            <button
+                                                className="pipeline-secondary-btn"
+                                                type="button"
+                                                onClick={() => setShowMappingAdvancedControls((prev) => !prev)}
+                                            >
+                                                {showMappingAdvancedControls ? "Hide Advanced" : "Show Advanced"}
+                                            </button>
                                             {selectedMappingSource ? (
                                                 <button className="pipeline-secondary-btn" type="button" onClick={() => setSelectedMappingSource("")}>Clear Selected Source</button>
                                             ) : null}
@@ -3182,7 +3665,14 @@ export default function PipelineBuilder({
                                                 <svg className="pipeline-mapping-modal-svg" width={MAPPING_MODAL_STAGE_WIDTH} height={mappingModalStageHeight}>
                                                     {mappingModalConnections.map((connection) => (
                                                         <g key={`${connection.sourceColumn}-${connection.targetColumn}-${connection.targetIndex}`}>
-                                                            <path d={connection.path} className="pipeline-mapping-svg-path" />
+                                                            <path
+                                                                d={connection.path}
+                                                                className="pipeline-mapping-svg-path"
+                                                                onClick={(event) => {
+                                                                    event.stopPropagation();
+                                                                    handleClearTargetMapping(connection.targetIndex, connection.sourceColumn);
+                                                                }}
+                                                            />
                                                             <circle cx={connection.startX} cy={connection.startY} r="4" className="pipeline-mapping-svg-dot" />
                                                             <circle cx={connection.endX} cy={connection.endY} r="4" className="pipeline-mapping-svg-dot" />
                                                         </g>
@@ -3197,26 +3687,41 @@ export default function PipelineBuilder({
                                                         Drag Source Box
                                                     </button>
                                                     <div className="pipeline-mapper-box-title">
-                                                        {normalizedMappingConfig.source.schema || pipelineForm.schema_name || "src"}
-                                                        {normalizedMappingConfig.source.object ? `.${normalizedMappingConfig.source.object}` : ".source"}
+                                                        {additionalSources.length > 0
+                                                            ? `${normalizedMappingConfig.source.object || "source"} +${additionalSources.length} more`
+                                                            : `${normalizedMappingConfig.source.schema || pipelineForm.schema_name || "src"}${normalizedMappingConfig.source.object ? `.${normalizedMappingConfig.source.object}` : ".source"}`}
                                                     </div>
                                                     <div className="pipeline-mapper-col-list">
-                                                        {mappingSourceColumns.length ? mappingSourceColumns.map((column) => {
-                                                            const sourceKey = String(column.column_name || "");
-                                                            const isSelected = selectedMappingSource.toLowerCase() === sourceKey.toLowerCase();
-                                                            const usageCount = mappingSourceUsage.get(sourceKey.toLowerCase()) || 0;
-                                                            return (
-                                                                <button
-                                                                    key={sourceKey}
-                                                                    type="button"
-                                                                    className={`pipeline-mapper-col-row ${isSelected ? "active" : ""}`}
-                                                                    onClick={() => setSelectedMappingSource(sourceKey)}
-                                                                >
-                                                                    <span>{column.column_name}</span>
-                                                                    <span className="pipeline-mapper-col-meta">{usageCount ? `${usageCount} link` : column.data_type}</span>
-                                                                </button>
-                                                            );
-                                                        }) : (
+                                                        {mappingSourceColumns.length ? (() => {
+                                                            let lastTable = null;
+                                                            return mappingSourceColumns.map((column) => {
+                                                                const sourceKey = String(column.column_name || "");
+                                                                const isSelected = selectedMappingSource.toLowerCase() === sourceKey.toLowerCase();
+                                                                const usageCount = mappingSourceUsage.get(sourceKey.toLowerCase()) || 0;
+                                                                const tableHeader = column._table !== lastTable ? (() => { lastTable = column._table; return column._table; })() : (lastTable = column._table, null);
+                                                                const displayName = column._is_additional
+                                                                    ? sourceKey.slice(sourceKey.indexOf(".") + 1)
+                                                                    : column.column_name;
+                                                                return (
+                                                                    <>
+                                                                        {tableHeader && column._is_additional && (
+                                                                            <div key={`header-${column._table}`} style={{ padding: "4px 8px 2px", fontSize: "10px", fontWeight: 600, opacity: 0.5, textTransform: "uppercase", letterSpacing: "0.05em", borderTop: "1px solid var(--border-subtle, #e5e7eb)", marginTop: "4px" }}>
+                                                                                {column._table}
+                                                                            </div>
+                                                                        )}
+                                                                        <button
+                                                                            key={sourceKey}
+                                                                            type="button"
+                                                                            className={`pipeline-mapper-col-row ${isSelected ? "active" : ""}`}
+                                                                            onClick={() => setSelectedMappingSource(sourceKey)}
+                                                                        >
+                                                                            <span>{displayName}</span>
+                                                                            <span className="pipeline-mapper-col-meta" title={column.data_type}>{usageCount ? `${usageCount} link` : simplifyMappingDataType(column.data_type)}</span>
+                                                                        </button>
+                                                                    </>
+                                                                );
+                                                            });
+                                                        })() : (
                                                             <div className="pipeline-empty pipeline-mapper-empty">No source columns loaded.</div>
                                                         )}
                                                     </div>
@@ -3235,14 +3740,32 @@ export default function PipelineBuilder({
                                                     </div>
                                                     <div className="pipeline-mapper-col-list">
                                                         {mappingCanvasTargets.length ? mappingCanvasTargets.map((column, index) => (
-                                                            <div key={`mapping-target-${index}`} className={`pipeline-mapper-col-row target ${column.source_column ? "linked" : ""}`}>
-                                                                <button
-                                                                    type="button"
-                                                                    className={`pipeline-mapper-link-btn ${selectedMappingSource ? "ready" : ""}`}
-                                                                    onClick={() => handleCanvasTargetMap(index)}
-                                                                >
-                                                                    {selectedMappingSource ? "Connect" : (column.source_column || "Select source")}
-                                                                </button>
+                                                            <div key={`mapping-target-${index}`} className={`pipeline-mapper-col-row target ${column.source_columns?.length ? "linked" : ""} ${showMappingAdvancedControls ? "advanced" : ""}`}>
+                                                                <div className="pipeline-mapper-source-chips">
+                                                                    {(column.source_columns || []).map((src) => (
+                                                                        <span key={src} className="pipeline-mapper-source-chip">
+                                                                            <span className="pipeline-mapper-source-chip-label">{src}</span>
+                                                                            <button
+                                                                                type="button"
+                                                                                className="pipeline-mapper-source-chip-remove"
+                                                                                onClick={() => handleClearTargetMapping(index, src)}
+                                                                            >
+                                                                                ×
+                                                                            </button>
+                                                                        </span>
+                                                                    ))}
+                                                                    <button
+                                                                        type="button"
+                                                                        className={`pipeline-mapper-link-btn ${selectedMappingSource ? "ready" : ""}`}
+                                                                        onClick={() => handleCanvasTargetMap(index)}
+                                                                    >
+                                                                        {selectedMappingSource
+                                                                            ? "Connect"
+                                                                            : column.source_columns?.length
+                                                                            ? "+"
+                                                                            : "Select source"}
+                                                                    </button>
+                                                                </div>
                                                                 <input
                                                                     type="text"
                                                                     className="pipeline-mapper-target-input"
@@ -3256,31 +3779,40 @@ export default function PipelineBuilder({
                                                                     className="pipeline-mapper-type-input"
                                                                     value={column.data_type}
                                                                     onChange={(e) => handleMappingColumnChange(index, "data_type", e.target.value)}
+                                                                    onBlur={(e) => handleMappingColumnChange(index, "data_type", simplifyMappingDataType(e.target.value))}
                                                                     placeholder="Type"
                                                                     size={getMappingInputWidthCh(column.data_type, 10, 18)}
+                                                                    title={column.data_type}
                                                                 />
-                                                                <div className="pipeline-mapper-col-actions">
-                                                                    <label className="pipeline-mapping-toggle-chip">
-                                                                        <input
-                                                                            type="checkbox"
-                                                                            checked={column.is_nullable !== false}
-                                                                            onChange={(e) => handleMappingColumnChange(index, "is_nullable", e.target.checked)}
-                                                                        />
-                                                                        <span>Nullable</span>
-                                                                    </label>
-                                                                    <label className="pipeline-mapping-toggle-chip">
-                                                                        <input
-                                                                            type="checkbox"
-                                                                            checked={column.include !== false}
-                                                                            onChange={(e) => handleMappingColumnChange(index, "include", e.target.checked)}
-                                                                        />
-                                                                        <span>Include</span>
-                                                                    </label>
-                                                                    {column.source_column ? (
-                                                                        <button type="button" className="pipeline-secondary-btn" onClick={() => handleClearTargetMapping(index)}>Clear</button>
-                                                                    ) : null}
-                                                                    <button type="button" className="pipeline-danger-btn pipeline-mapping-remove-btn" onClick={() => handleRemoveMappingColumn(index)}>Remove</button>
-                                                                </div>
+                                                                {showMappingAdvancedControls ? (
+                                                                    <div className="pipeline-mapper-advanced-inline">
+                                                                        <label className="pipeline-mapping-toggle-chip" title="Nullable">
+                                                                            <input
+                                                                                type="checkbox"
+                                                                                checked={column.is_nullable !== false}
+                                                                                onChange={(e) => handleMappingColumnChange(index, "is_nullable", e.target.checked)}
+                                                                            />
+                                                                            <span>Null</span>
+                                                                        </label>
+                                                                        <label className="pipeline-mapping-toggle-chip" title="Include in target">
+                                                                            <input
+                                                                                type="checkbox"
+                                                                                checked={column.include !== false}
+                                                                                onChange={(e) => handleMappingColumnChange(index, "include", e.target.checked)}
+                                                                            />
+                                                                            <span>Incl</span>
+                                                                        </label>
+                                                                        {column.is_manual ? (
+                                                                            <button
+                                                                                type="button"
+                                                                                className="pipeline-mapper-inline-btn danger"
+                                                                                onClick={() => handleRemoveMappingColumn(index)}
+                                                                            >
+                                                                                Delete
+                                                                            </button>
+                                                                        ) : null}
+                                                                    </div>
+                                                                ) : null}
                                                             </div>
                                                         )) : (
                                                             <div className="pipeline-empty pipeline-mapper-empty">No target columns available yet. Prepare nodes or add a target column first.</div>
@@ -3310,6 +3842,14 @@ export default function PipelineBuilder({
                                             disabled={!selectedPipelineId || !currentTransformationSql?.trim()}
                                         >
                                             Import Current Transformation
+                                        </button>
+                                        <button
+                                            className="pipeline-secondary-btn"
+                                            type="button"
+                                            onClick={handleValidatePipelineSteps}
+                                            disabled={!selectedPipelineId || validatingPipelineSteps || executing}
+                                        >
+                                            {validatingPipelineSteps ? "Validating..." : "Validate Steps"}
                                         </button>
                                         <button
                                             className="pipeline-secondary-btn"
@@ -3393,7 +3933,13 @@ export default function PipelineBuilder({
                                                 <button
                                                     className="pipeline-secondary-btn"
                                                     type="button"
-                                                    onClick={() => { setAgentResult(null); setAgentRequirement(""); setAgentAddedSteps(new Set()); }}
+                                                    onClick={() => {
+                                                        setAgentResult(null);
+                                                        setAgentRequirement("");
+                                                        setAgentAddedSteps(new Set());
+                                                        setAgentStepDrafts({});
+                                                        setAgentValidationSummary(null);
+                                                    }}
                                                 >
                                                     Clear Results
                                                 </button>
@@ -3425,6 +3971,11 @@ export default function PipelineBuilder({
                                                     <div className="agent-results-summary">
                                                         <span className="agent-badge-total">{agentResult.total_steps} steps planned</span>
                                                         <span className="agent-badge-validated">{agentResult.validated_steps} validated</span>
+                                                        {agentValidationSummary ? (
+                                                            <span className={`agent-badge-validated ${agentValidationSummary.valid ? "agent-step-validated" : "agent-step-partial"}`}>
+                                                                Validation: {agentValidationSummary.validatedSteps}/{agentValidationSummary.totalSteps}
+                                                            </span>
+                                                        ) : null}
                                                         {agentResult.target_resolution?.target_label && (
                                                             <span className="agent-plan-summary">
                                                                 Target: {agentResult.target_resolution.target_label}
@@ -3443,9 +3994,21 @@ export default function PipelineBuilder({
                                                     >
                                                         {agentAddingAll ? "Adding…" : `Add All ${agentResult.steps.length} Steps to Pipeline`}
                                                     </button>
+                                                    <button
+                                                        className="pipeline-secondary-btn"
+                                                        type="button"
+                                                        disabled={agentValidatingAll || !agentResult.steps.length}
+                                                        onClick={handleValidateAllAgentSteps}
+                                                    >
+                                                        {agentValidatingAll ? "Validating..." : "Validate All Steps"}
+                                                    </button>
                                                 </div>
 
                                                 {agentResult.steps.map((step, idx) => {
+                                                    const stepDraft = agentStepDrafts[idx] || {
+                                                        step_name: step.step_name,
+                                                        sql_text: step.sql_text,
+                                                    };
                                                     const aiStepVerb = getSqlLeadingVerb(step.sql_text || "");
                                                     const aiStepIsDdl = DDL_KEYWORDS.has(aiStepVerb);
 
@@ -3475,6 +4038,14 @@ export default function PipelineBuilder({
                                                                         {agentExpandedSteps[idx] ? "Hide SQL" : "Show SQL"}
                                                                     </button>
                                                                     <button
+                                                                        className="pipeline-secondary-btn"
+                                                                        type="button"
+                                                                        disabled={agentAddedSteps.has(idx)}
+                                                                        onClick={() => handleRollbackAgentStep(idx)}
+                                                                    >
+                                                                        Rollback to Generated
+                                                                    </button>
+                                                                    <button
                                                                         className="pipeline-primary-btn agent-add-btn"
                                                                         type="button"
                                                                         disabled={agentAddedSteps.has(idx)}
@@ -3489,8 +4060,30 @@ export default function PipelineBuilder({
                                                                 <div className="agent-step-explanation">{step.explanation}</div>
                                                             )}
 
+                                                            {step.validation_error ? (
+                                                                <div className="agent-error-box">Validation error: {step.validation_error}</div>
+                                                            ) : null}
+
+                                                            <div className="form-field" style={{ marginTop: "8px" }}>
+                                                                <label>Step Name</label>
+                                                                <input
+                                                                    type="text"
+                                                                    value={stepDraft.step_name}
+                                                                    onChange={(e) => handleAgentStepDraftChange(idx, "step_name", e.target.value, step)}
+                                                                    disabled={agentAddedSteps.has(idx)}
+                                                                />
+                                                            </div>
+
                                                             {agentExpandedSteps[idx] && (
-                                                                <pre className="agent-sql-block">{step.sql_text}</pre>
+                                                                <div className="form-field" style={{ marginTop: "8px" }}>
+                                                                    <label>Generated SQL (Editable)</label>
+                                                                    <textarea
+                                                                        rows={10}
+                                                                        value={stepDraft.sql_text}
+                                                                        onChange={(e) => handleAgentStepDraftChange(idx, "sql_text", e.target.value, step)}
+                                                                        disabled={agentAddedSteps.has(idx)}
+                                                                    />
+                                                                </div>
                                                             )}
 
                                                             {step.warnings?.length > 0 && (
@@ -3600,28 +4193,79 @@ export default function PipelineBuilder({
                                         <div className="pipeline-empty">No pipeline steps added yet.</div>
                                     ) : (
                                         selectedPipeline.steps.map((step) => {
+                                            const isEditingStep = editingStepId === step.id;
                                             const stepVerb = getSqlLeadingVerb(step.sql_text || "");
                                             const stepIsDdl = DDL_KEYWORDS.has(stepVerb);
                                             return (
                                                 <div key={step.id} className={`pipeline-step-card-ui ${stepIsDdl ? "pipeline-step-ddl" : ""}`}>
                                                     <div className="pipeline-step-header">
-                                                        <div>
+                                                        <div style={{ flex: 1 }}>
                                                             <div className="pipeline-step-order">Step {step.step_order}</div>
-                                                            <div className="pipeline-step-name">{step.step_name}</div>
+                                                            {isEditingStep ? (
+                                                                <input
+                                                                    type="text"
+                                                                    value={editingStepForm.step_name}
+                                                                    onChange={(e) => setEditingStepForm((prev) => ({ ...prev, step_name: e.target.value }))}
+                                                                    placeholder="Step name"
+                                                                />
+                                                            ) : (
+                                                                <div className="pipeline-step-name">{step.step_name}</div>
+                                                            )}
                                                             {stepIsDdl ? (
                                                                 <span className="pipeline-ddl-badge">DDL: {stepVerb.toUpperCase()}</span>
                                                             ) : null}
                                                         </div>
-                                                        <button
-                                                            className="pipeline-danger-btn"
-                                                            type="button"
-                                                            onClick={() => handleDeleteStep(step.id)}
-                                                        >
-                                                            Remove
-                                                        </button>
+
+                                                        <div className="pipeline-actions-row">
+                                                            {isEditingStep ? (
+                                                                <>
+                                                                    <button
+                                                                        className="pipeline-primary-btn"
+                                                                        type="button"
+                                                                        disabled={savingStepEdit}
+                                                                        onClick={() => handleSaveStepEdit(step.id)}
+                                                                    >
+                                                                        {savingStepEdit ? "Saving..." : "Save"}
+                                                                    </button>
+                                                                    <button
+                                                                        className="pipeline-secondary-btn"
+                                                                        type="button"
+                                                                        disabled={savingStepEdit}
+                                                                        onClick={handleCancelEditStep}
+                                                                    >
+                                                                        Cancel
+                                                                    </button>
+                                                                </>
+                                                            ) : (
+                                                                <button
+                                                                    className="pipeline-secondary-btn"
+                                                                    type="button"
+                                                                    onClick={() => handleStartEditStep(step)}
+                                                                >
+                                                                    Edit
+                                                                </button>
+                                                            )}
+
+                                                            <button
+                                                                className="pipeline-danger-btn"
+                                                                type="button"
+                                                                onClick={() => handleDeleteStep(step.id)}
+                                                            >
+                                                                Remove
+                                                            </button>
+                                                        </div>
                                                     </div>
 
-                                                    <pre className={`pipeline-code-block ${stepIsDdl ? "pipeline-code-ddl" : ""}`}>{step.sql_text}</pre>
+                                                    {isEditingStep ? (
+                                                        <textarea
+                                                            rows="10"
+                                                            value={editingStepForm.sql_text}
+                                                            onChange={(e) => setEditingStepForm((prev) => ({ ...prev, sql_text: e.target.value }))}
+                                                            placeholder="SQL"
+                                                        />
+                                                    ) : (
+                                                        <pre className={`pipeline-code-block ${stepIsDdl ? "pipeline-code-ddl" : ""}`}>{step.sql_text}</pre>
+                                                    )}
                                                 </div>
                                             );
                                         })

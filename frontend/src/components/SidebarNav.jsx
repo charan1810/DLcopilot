@@ -1,9 +1,11 @@
 import {
+    Blocks,
     Columns3,
     Database,
     Gauge,
     GitBranch,
     LogOut,
+    Network,
     PanelLeftClose,
     PanelLeftOpen,
     Shield,
@@ -17,7 +19,9 @@ const NAV_GROUPS = [
         label: "Engineering",
         items: [
             { key: "explorer", label: "Explorer", icon: Database },
-            { key: "lineage", label: "ETL / Lineage", icon: GitBranch, roles: ["admin", "developer"] },
+            { key: "modeldev",  label: "Entity Development",  icon: Blocks,    roles: ["admin", "architect", "developer"] },
+            { key: "lineage",   label: "ETL / Lineage",       icon: GitBranch, roles: ["admin", "architect", "developer"] },
+            { key: "orchestration", label: "Workflow Studio", icon: Network, roles: ["admin", "architect", "developer"] },
             { key: "insights", label: "Insights", icon: Sparkles },
         ],
     },
